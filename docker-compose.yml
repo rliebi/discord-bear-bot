@@ -1,0 +1,22 @@
+version: "3.8"
+services:
+  discord-bear-bot:
+    build: .
+    image: discord-bear-bot:latest
+    environment:
+      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - LOG_LEVEL=INFO
+      - DATA_DIR=/data
+    volumes:
+      - discord-bear-bot-data:/data
+    restart: unless-stopped
+    deploy:
+      replicas: 1
+      update_config:
+        parallelism: 1
+        order: start-first
+      restart_policy:
+        condition: on-failure
+volumes:
+  discord-bear-bot-data:
+    driver: local
