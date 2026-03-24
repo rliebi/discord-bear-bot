@@ -1,5 +1,7 @@
 import os
 import logging
+import asyncio
+import contextlib
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -51,9 +53,24 @@ class BearBot(commands.Bot):
         super().__init__(command_prefix=commands.when_mentioned_or("!"), intents=INTENTS)
 
     async def setup_hook(self):
-        # Sync tree per guild on ready
-        await self.tree.sync()
-        logger.info("Slash commands synced")
+        # Force a global sync on startup
+        try:
+            synced_global = await self.tree.sync()
+            logger.info(f"Slash commands globally synced: {len(synced_global)} commands")
+        except Exception as e:
+            logger.error(f"Global command sync failed on startup: {e}")
+
+        # Also perform a guild-scoped sync for each guild for faster availability/updates
+        for g in list(self.guilds):
+            if ALLOWED_GUILDS and not is_guild_allowed(g):
+                # Defer leaving unauthorized guilds to the pruning step below
+                continue
+            try:
+                sg = await self.tree.sync(guild=g)
+                logger.info(f"Guild {g.id} command sync complete: {len(sg)} commands")
+            except Exception as ge:
+                logger.warning(f"Guild-scoped sync failed for {g.id}: {ge}")
+
         # Optionally prune unauthorized guilds at startup if an allowlist is set
         if ALLOWED_GUILDS:
             for g in list(self.guilds):
@@ -174,9 +191,23 @@ async def calc(
         msg = calc_message if len(calc_message) <= 1024 else (calc_message[:1021] + "...")
         embed.add_field(name="Message from Admin", value=msg, inline=False)
 
+    # Send response first (without delete_after to ensure reliability on interactions)
+    await interaction.response.send_message(embed=embed, ephemeral=bool(hidden))
+
     # Auto-delete after configured TTL (minutes) for non-ephemeral messages; 0 means do not delete
-    delete_after = ttl_seconds if (not bool(hidden) and ttl_seconds is not None) else None
-    await interaction.response.send_message(embed=embed, ephemeral=bool(hidden), delete_after=delete_after)
+    if (not bool(hidden)) and (ttl_seconds is not None):
+        async def _del_later(inter: discord.Interaction, delay: int):
+            try:
+                await asyncio.sleep(delay)
+                with contextlib.suppress(Exception):
+                    await inter.delete_original_response()
+            except Exception as e:
+                logger.warning(f"Auto-delete task error: {e}")
+        try:
+            asyncio.create_task(_del_later(interaction, ttl_seconds))
+        except RuntimeError:
+            # Fallback if no running loop (shouldn't happen inside command handler)
+            pass
 
 
 # Admin group
@@ -290,6 +321,14 @@ async def on_guild_join(guild: discord.Guild):
             await guild.leave()
         except Exception as e:
             logger.error(f"Failed to auto-leave guild {guild.id}: {e}")
+        return
+
+    # For allowed guilds, proactively sync commands for this guild
+    try:
+        sg = await bot.tree.sync(guild=guild)
+        logger.info(f"Guild {guild.id} joined; command sync complete: {len(sg)} commands")
+    except Exception as e:
+        logger.warning(f"Guild-scoped sync on join failed for {guild.id}: {e}")
 
 
 def main():
