@@ -1,0 +1,6 @@
+#!/bin/sh
+# Simple entrypoint shim to start the Discord bot.
+# This exists so that orchestrators expecting /app/main can exec it directly.
+
+set -e
+exec python -m src.bot

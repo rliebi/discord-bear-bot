@@ -16,6 +16,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source
 COPY src ./src
+COPY main /app/main
+RUN chmod +x /app/main
 
 # Do NOT create /data or change ownership here to avoid chown on volumes
 # (The runtime volume mount will create it as needed.)
@@ -24,4 +26,4 @@ COPY src ./src
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD sh -c "python -c 'import importlib,sys;\nok=True\ntry:\n    importlib.import_module(\"src.bot\")\nexcept Exception:\n    ok=False\nsys.exit(0 if ok else 1)'" 
 
 # Entrypoint
-CMD ["python", "-m", "src.bot"]
+CMD ["/app/main"]
