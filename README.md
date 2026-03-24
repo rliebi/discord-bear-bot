@@ -121,11 +121,24 @@ This repository includes a workflow at .github/workflows/docker-publish.yml that
 - Builds the Docker image on PRs to main (no push)
 - Builds and pushes to GitHub Container Registry ghcr.io on pushes to main and version tags (vX.Y.Z)
 
-Tags published include branch, semantic tag, and commit SHA. No secrets needed beyond the default GITHUB_TOKEN.
+Tags published include branch, semantic tag, commit SHA, and latest (on the default branch). No secrets needed beyond the default GITHUB_TOKEN.
+
+Registry URL for this repository:
+- ghcr.io/rliebi/discord-bear-bot
+- Package page (web UI): https://github.com/rliebi/discord-bear-bot/pkgs/container/discord-bear-bot
+
+Common tags you will see:
+- :latest (latest successful build from the default branch)
+- :main (latest build from main)
+- :sha-<shortsha> (commit-specific)
+- :vX.Y.Z (when you push a version tag)
 
 To pull the image:
 - docker login ghcr.io -u <your_github_username> -p <a_personal_access_token_if_needed>
-- docker pull ghcr.io/<owner>/<repo>:<tag>
+- docker pull ghcr.io/rliebi/discord-bear-bot:latest
+- docker pull ghcr.io/rliebi/discord-bear-bot:main
+- docker pull ghcr.io/rliebi/discord-bear-bot:v0.1.0  # example
+- docker pull ghcr.io/rliebi/discord-bear-bot:sha-<shortsha>
 
 ## Contributing
 Contributions are welcome via pull requests. Please keep changes minimal and focused. Add tests where appropriate.
