@@ -41,8 +41,6 @@ class BearBot(commands.Bot):
 bot = BearBot()
 
 
-def to_int_1000_multiple(x: int) -> int:
-    return (int(x) // 1000) * 1000
 
 
 @bot.tree.command(name="calc", description="Calculate Kingshot Bear Troop Ratio for your marches")
@@ -104,7 +102,7 @@ async def calc(interaction: discord.Interaction, archer_total: app_commands.Rang
         embed.add_field(name="Calling March", value=(
             f"Archers: {result.calling_archers}\n"
             f"Infantry: {result.calling_infantry}\n"
-            f"Cavalry: {result.calling_cavalry}"
+            f"Cavalry: Rest"
         ), inline=True)
     else:
         embed.add_field(name="Calling March", value="N/A (not a caller)", inline=True)
@@ -130,15 +128,15 @@ class AdminGroup(app_commands.Group):
 
     @app_commands.command(name="set-infantry-amount", description="Set fixed infantry amount per march")
     async def set_infantry_amount(self, interaction: discord.Interaction, value: app_commands.Range[int, 0, 1000000]):
-        v = to_int_1000_multiple(value)
+        v = int(value)
         s = update_guild_settings(interaction.guild.id, {"infantry_amount": v})
-        await interaction.response.send_message(f"Infantry Amount set to {s['infantry_amount']} (rounded to 1000)", ephemeral=True)
+        await interaction.response.send_message(f"Infantry Amount set to {s['infantry_amount']}", ephemeral=True)
 
     @app_commands.command(name="set-max-archers-amount", description="Set max archers cap per march")
     async def set_max_archers_amount(self, interaction: discord.Interaction, value: app_commands.Range[int, 0, 1000000]):
-        v = to_int_1000_multiple(value)
+        v = int(value)
         s = update_guild_settings(interaction.guild.id, {"max_archers_amount": v})
-        await interaction.response.send_message(f"Max Archers Amount set to {s['max_archers_amount']} (rounded to 1000)", ephemeral=True)
+        await interaction.response.send_message(f"Max Archers Amount set to {s['max_archers_amount']}", ephemeral=True)
 
     @app_commands.command(name="show-settings", description="Show current server settings")
     async def show_settings(self, interaction: discord.Interaction):

@@ -30,25 +30,24 @@ Given:
 1. Caller archer value for joining marches:
    - Divisor = MC + (1 if C else 0)
    - Base = floor(TA / Divisor)
-   - Round Base down to the nearest 1000
    - Cap by MAA
    - This value is used as Archers for each joining march.
 2. Joining march:
    - Archers = caller archer value (from step 1)
    - Infantry = INF (from server)
-   - Cavalry = round down to 1000 of (MTS - Archers - Infantry)
+   - Cavalry = max(0, MTS - Archers - Infantry)
 3. Calling march (only if C is true):
    - Infantry = INF
-   - Archers = round down to 1000 of min( TA - (caller archer value * MC), MTS - Infantry )
-   - Cavalry = round down to 1000 of (MTS - Infantry - Archers)
+   - Archers = min( TA - (caller archer value * MC), MTS - Infantry )
+   - Cavalry = Rest (i.e., MTS - Infantry - Archers)
 
-All rounding down is to the nearest 1000, with a minimum of 0.
+Joining march archers are rounded down to the nearest 1000. The calling march is not rounded.
 
 ## Commands
 - `/calc archer_total:<int> march_count:<int> calling:<bool>`
 - `/admin set-max-troop-size <int>`
-- `/admin set-infantry-amount <int>` (rounded down to nearest 1000)
-- `/admin set-max-archers-amount <int>` (rounded down to nearest 1000)
+- `/admin set-infantry-amount <int>`
+- `/admin set-max-archers-amount <int>`
 - `/admin show-settings`
 - `/admin set-admin <@user>`
 

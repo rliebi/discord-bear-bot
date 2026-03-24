@@ -12,8 +12,8 @@ If you haven’t created a Discord Application and Bot yet, follow docs/SETUP_DI
 The bot needs three server-wide settings. Only the admin can set them.
 
 - Max Troop Size (MTS): maximum units per march.
-- Infantry Amount (INF): fixed number of infantry per march (rounded down to nearest 1000 on set).
-- Max Archers Amount (MAA): cap for archers in a joining march (rounded down to nearest 1000 on set).
+- Infantry Amount (INF): fixed number of infantry per march.
+- Max Archers Amount (MAA): cap for archers in a joining march.
 
 Commands:
 - `/admin set-max-troop-size <int>`
@@ -46,20 +46,20 @@ Given server settings MTS, INF, MAA and user input TA, MC, Calling:
 1) Caller archer value for joining marches
 - Divisor = MC + (1 if Calling else 0)
 - Base = floor(TA / Divisor)
-- Round base down to nearest 1000
 - Cap by MAA
+- Round DOWN to nearest 1000 → caller_archer_value = floor_1000(min(Base, MAA))
 
 2) Joining march
-- Archers = caller archer value
+- Archers = caller_archer_value (rounded to 1000)
 - Infantry = INF
-- Cavalry = floor_1000(MTS - Archers - Infantry)
+- Cavalry = max(0, MTS - Archers - Infantry)
 
 3) Calling march (only when calling=true)
 - Infantry = INF
-- Archers = floor_1000(min(TA - (caller_archer_value * MC), MTS - Infantry))
-- Cavalry = floor_1000(MTS - Infantry - Archers)
+- Archers = min(TA - (caller_archer_value * MC), MTS - Infantry)  (no extra rounding)
+- Cavalry = Rest (i.e., MTS - Infantry - Archers)
 
-All rounding is to the nearest 1000 downward with a minimum of 0.
+Rounding rule: Only the joining march archers are rounded down to the nearest 1000. The calling march values are not rounded.
 
 ### Examples
 Assume server settings: MTS=300000, INF=20000, MAA=160000
@@ -79,7 +79,7 @@ Assume server settings: MTS=300000, INF=20000, MAA=160000
 - Divisor = 3
 - Base Archers = floor(400000 / 3) = 133333 → round to 133000 → cap ≤ 160000 → 133000
 - Joining March = Archers 133000, Infantry 20000, Cavalry 147000
-- Calling March Archers = floor_1000(min(400000 - (133000*2)=134000, 300000-20000=280000)) = 134000
+- Calling March Archers = min(400000 - (133000*2)=134000, 300000-20000=280000) = 134000
 - Calling March Cavalry = 300000 - 20000 - 134000 = 146000
 
 ## Troubleshooting

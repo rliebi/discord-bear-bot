@@ -2,12 +2,6 @@ from dataclasses import dataclass
 from typing import Tuple
 
 
-def round_down_to_1000(n: int) -> int:
-    if n <= 0:
-        return 0
-    return (n // 1000) * 1000
-
-
 @dataclass
 class GuildConfig:
     max_troop_size: int
@@ -33,28 +27,27 @@ def compute_kingshot(g: GuildConfig, total_archers: int, march_count: int, is_ca
     if g.infantry_amount < 0 or g.max_archers_amount < 0:
         raise ValueError("Invalid server settings")
 
-    # Caller archer value for joining marches
+    # Caller archer value for joining marches (rounded down to nearest 1000)
     divisor = march_count + (1 if is_caller else 0)
     base = total_archers // max(1, divisor)
-    base = round_down_to_1000(base)
-    caller_archer_value = min(base, g.max_archers_amount)
+    capped = min(base, g.max_archers_amount)
+    caller_archer_value = (capped // 1000) * 1000  # floor to 1000s for joiners
 
-    # Joining march values
+    # Joining march values (joining archers rounded to 1000)
     joining_archers = caller_archer_value
     joining_infantry = g.infantry_amount
     joining_cavalry = max(0, g.max_troop_size - joining_archers - joining_infantry)
-    joining_cavalry = round_down_to_1000(joining_cavalry)
 
-    # Calling march values
+    # Calling march values (no 1000 rounding on caller march)
     if is_caller:
+        # Use the rounded joining value for remaining archers calc
         remaining_archers = total_archers - (caller_archer_value * march_count)
         remaining_archers = max(0, remaining_archers)
         calling_infantry = g.infantry_amount
-        # Fit archers then cav into max troop size, also keep 1000-step rounding
+        # Fit archers then cav into max troop size
         max_archers_slot = max(0, g.max_troop_size - calling_infantry)
-        calling_archers = round_down_to_1000(min(remaining_archers, max_archers_slot))
+        calling_archers = min(remaining_archers, max_archers_slot)
         calling_cavalry = max(0, g.max_troop_size - calling_infantry - calling_archers)
-        calling_cavalry = round_down_to_1000(calling_cavalry)
     else:
         calling_archers = 0
         calling_infantry = 0

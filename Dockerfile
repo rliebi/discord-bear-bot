@@ -26,17 +26,7 @@ VOLUME ["/data"]
 USER appuser
 
 # Healthcheck: ensure Python can import and data dir exists
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD python - <<'PY' || exit 1
-import os, importlib
-ok = True
-try:
-    importlib.import_module('src.bot')
-except Exception:
-    ok = False
-print('OK' if ok and os.path.isdir('/data') else 'FAIL')
-exit(0 if ok and os.path.isdir('/data') else 1)
-PY
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD sh -c "python -c \"import os, importlib, sys; ok=True;\n\ntry:\n    importlib.import_module('src.bot')\nexcept Exception:\n    ok=False\n\nsys.exit(0 if ok and os.path.isdir('/data') else 1)\"" 
 
 # Entrypoint
-ENV DISCORD_TOKEN=""
 CMD ["python", "-m", "src.bot"]
