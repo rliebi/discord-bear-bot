@@ -201,26 +201,43 @@ async def calc(
 
     # Auto-delete after configured TTL (minutes) for non-ephemeral messages; 0 means do not delete
     if (not bool(hidden)) and (ttl_seconds is not None):
+        message_id: Optional[int] = None
+        channel_id: Optional[int] = None
         try:
-            # Obtain the created message object now, while the interaction context is fresh
-            msg = await interaction.original_response()
+            # Obtain the created message (Interaction original response) and capture IDs
+            imsg = await interaction.original_response()
+            message_id = int(imsg.id)
+            if interaction.channel is not None:
+                channel_id = int(interaction.channel.id)
         except Exception as e:
             logger.warning(f"Could not fetch original response message for auto-delete: {e}")
-            msg = None
 
-        if msg is not None:
-            async def _del_later(message: discord.Message, delay: int):
-                try:
-                    await asyncio.sleep(delay)
-                    with contextlib.suppress(Exception):
-                        await message.delete()
-                except Exception as e:
-                    logger.warning(f"Auto-delete task error: {e}")
+        async def _del_later_v2(delay: int, msg_id: Optional[int], chan_id: Optional[int]):
             try:
-                asyncio.create_task(_del_later(msg, ttl_seconds))
-            except RuntimeError:
-                # Fallback if no running loop (shouldn't happen inside command handler)
-                pass
+                await asyncio.sleep(delay)
+                # Attempt 1: delete via webhook token (works for ~15 minutes after creation)
+                with contextlib.suppress(Exception):
+                    await interaction.delete_original_response()
+                    return
+                # Attempt 2: fetch the message via the bot token and delete it
+                if msg_id is not None and chan_id is not None:
+                    chan = interaction.client.get_channel(chan_id)
+                    # Fallback: try to fetch the channel via API if not cached
+                    if chan is None:
+                        with contextlib.suppress(Exception):
+                            chan = await interaction.client.fetch_channel(chan_id)  # type: ignore[attr-defined]
+                    if hasattr(chan, "fetch_message"):
+                        with contextlib.suppress(Exception):
+                            m = await chan.fetch_message(msg_id)  # type: ignore[assignment]
+                            await m.delete()
+            except Exception as e:
+                logger.warning(f"Auto-delete task error: {e}")
+
+        try:
+            asyncio.create_task(_del_later_v2(ttl_seconds, message_id, channel_id))
+        except RuntimeError:
+            # Fallback if no running loop (shouldn't happen inside command handler)
+            pass
 
 
 # Admin group

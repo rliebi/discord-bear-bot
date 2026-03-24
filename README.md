@@ -197,14 +197,19 @@ What happens if you run multiple containers of the same bot token at once?
 
 To prevent this by default, this project includes a simple singleton guard:
 - On startup, the bot tries to acquire an exclusive file lock at `${DATA_DIR}/bot.lock`.
-- If the lock is already held (another instance is running against the same data directory), this instance exits with an error.
-- This protects you from accidental duplicate instances on the same host or on any cluster setup where `/data` is a shared volume.
+- If the lock is already held (another instance is running against the same data directory), the bot will WAIT and retry until the lock becomes available. This avoids crash/restart loops during rolling updates (e.g., Swarm `start-first`).
+- You can change this behavior with environment variables (see below). This protects you from accidental duplicate instances on the same host or on any cluster setup where `/data` is a shared volume.
+
+Environment variables related to single-instance behavior:
+- `ALLOW_MULTI_INSTANCE` (default: false): When set to true, bypasses the singleton guard entirely. Use only if implementing sharding or other coordination.
+- `SINGLETON_WAIT` (default: true): When true, the bot waits and retries if the lock is held by another instance. If set to false, the bot exits immediately with an error when it cannot acquire the lock.
+- `SINGLETON_WAIT_INTERVAL` (default: 5): Seconds to wait between retries when `SINGLETON_WAIT=true`.
 
 Advanced: allow multiple instances (not recommended unless you know why)
-- Set `ALLOW_MULTI_INSTANCE=true` to bypass the lock. Only do this if you are implementing proper sharding or otherwise ensuring that only one instance will handle a given interaction.
+- Prefer keeping a single replica per token. If you truly need multiple processes, set `ALLOW_MULTI_INSTANCE=true` and implement shard awareness.
 - discord.py supports sharding, but this template does not set it up. If you need true horizontal scale, prefer a single replica per token or implement shard awareness explicitly.
 
 Recommendations
-- Docker Compose/Swarm: keep `replicas: 1` for this service.
+- Docker Compose/Swarm: keep `replicas: 1` for this service. The default wait-on-lock behavior makes rolling updates smooth without duplicate handling.
 - If you need high availability, run a supervisor to restart on failure rather than running concurrent replicas of the same token.
 - If you run multiple nodes with a non-shared volume driver, the file lock will not coordinate across nodes. Use a shared volume for `/data` or keep replicas at 1 to avoid duplicates.
