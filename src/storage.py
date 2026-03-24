@@ -43,6 +43,7 @@ def get_guild_settings(guild_id: int) -> Dict[str, Any]:
         g.setdefault("infantry_amount", 0)
         g.setdefault("max_archers_amount", 0)
         g.setdefault("calc_message", "")
+        g.setdefault("message_ttl_minutes", 10)
         data[gid] = g
         _write_all(data)
         return g
@@ -71,6 +72,7 @@ def set_admin_if_unset(guild_id: int, user_id: int) -> Optional[int]:
             g.setdefault("infantry_amount", 0)
             g.setdefault("max_archers_amount", 0)
             g.setdefault("calc_message", "")
+            g.setdefault("message_ttl_minutes", 10)
             data[gid] = g
             _write_all(data)
             return int(user_id)

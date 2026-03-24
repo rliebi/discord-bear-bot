@@ -23,6 +23,7 @@ Commands:
 - `/admin clear-calc-message` (remove the custom message)
 - `/admin show-settings` (view the current values)
 - `/admin resync-commands` (force a re-sync of slash commands if Discord shows them as outdated)
+- `/admin set-message-ttl-minutes <int>` (auto-delete /calc messages after N minutes; 0 disables)
 
 Example setup:
 ```
@@ -47,6 +48,8 @@ Use the slash command:
 - Calling March table: shown only if calling=true. Provides an Archer/Inf/Cav composition for your caller march
 
 Note: By default, /calc results are posted publicly in the channel so your team can coordinate. Set `hidden:true` to receive the result privately. Admin commands remain ephemeral.
+
+Auto-delete: Non-ephemeral /calc messages are automatically deleted after 10 minutes by default. Admins can change the timeout with `/admin set-message-ttl-minutes <N>` or set it to `0` to disable auto-deletion.
 
 ### Ratio Mode (automatic, caller only)
 We switch to simple ratio guidance only for the CALLING march when you have a surplus of archers:

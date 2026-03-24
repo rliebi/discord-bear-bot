@@ -102,6 +102,8 @@ async def calc(
         max_archers_amount=int(s.get("max_archers_amount", 0)),
     )
     calc_message = str(s.get("calc_message", "") or "").strip()
+    ttl_minutes = int(s.get("message_ttl_minutes", 10) or 0)
+    ttl_seconds = ttl_minutes * 60 if ttl_minutes > 0 else None
 
     # Validate server settings
     if g.max_troop_size <= 0 or g.infantry_amount < 0 or g.max_archers_amount < 0:
@@ -172,7 +174,9 @@ async def calc(
         msg = calc_message if len(calc_message) <= 1024 else (calc_message[:1021] + "...")
         embed.add_field(name="Message from Admin", value=msg, inline=False)
 
-    await interaction.response.send_message(embed=embed, ephemeral=bool(hidden))
+    # Auto-delete after configured TTL (minutes) for non-ephemeral messages; 0 means do not delete
+    delete_after = ttl_seconds if (not bool(hidden) and ttl_seconds is not None) else None
+    await interaction.response.send_message(embed=embed, ephemeral=bool(hidden), delete_after=delete_after)
 
 
 # Admin group
@@ -224,13 +228,23 @@ class AdminGroup(app_commands.Group):
         update_guild_settings(interaction.guild.id, {"calc_message": ""})
         await interaction.response.send_message("Calculation message cleared.", ephemeral=True)
 
+    @app_commands.command(name="set-message-ttl-minutes", description="Set auto-delete time for /calc messages in minutes (0 disables)")
+    @app_commands.describe(value="Minutes to keep messages before auto-delete; 0 = do not delete")
+    async def set_message_ttl_minutes(self, interaction: discord.Interaction, value: app_commands.Range[int, 0, 10080]):
+        v = int(value)
+        s = update_guild_settings(interaction.guild.id, {"message_ttl_minutes": v})
+        msg = "disabled (0)" if v == 0 else f"{v} minutes"
+        await interaction.response.send_message(f"Message auto-delete set to {msg}.", ephemeral=True)
+
     @app_commands.command(name="show-settings", description="Show current server settings")
     async def show_settings(self, interaction: discord.Interaction):
         s = get_guild_settings(interaction.guild.id)
         calc_msg = (s.get("calc_message") or "").strip()
         calc_msg_status = "(not set)" if not calc_msg else ((calc_msg if len(calc_msg) <= 140 else calc_msg[:137] + "...") )
+        ttl = int(s.get("message_ttl_minutes", 10) or 0)
+        ttl_str = f"{ttl} min" if ttl > 0 else "disabled (0)"
         await interaction.response.send_message(
-            f"Admin: <@{s['admin_user_id']}>\nMax Troop Size: {s['max_troop_size']}\nInfantry Amount: {s['infantry_amount']}\nMax Archers Amount: {s['max_archers_amount']}\nCalc Message: {calc_msg_status}",
+            f"Admin: <@{s['admin_user_id']}>\nMax Troop Size: {s['max_troop_size']}\nInfantry Amount: {s['infantry_amount']}\nMax Archers Amount: {s['max_archers_amount']}\nMessage TTL: {ttl_str}\nCalc Message: {calc_msg_status}",
             ephemeral=True,
         )
 

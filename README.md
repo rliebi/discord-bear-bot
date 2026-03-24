@@ -62,6 +62,7 @@ Joining march archers are rounded down to the nearest 1000 only when you are the
 - `/admin set-calc-message <text>` (message appended to every /calc result)
 - `/admin clear-calc-message` (remove the message)
 - `/admin resync-commands` (force re-sync of slash commands if they appear outdated)
+- `/admin set-message-ttl-minutes <int>` (auto-delete /calc messages after N minutes; 0 disables)
 
 Admin checks: The first user who runs any command in a guild becomes admin automatically. Only the admin can use `/admin` commands.
 
@@ -103,6 +104,7 @@ Per-guild settings are stored in JSON at `/data/guild_settings.json`. The contai
 - The bot requests only the Guilds intent.
 - Uses slash commands (interactions) and defers message content.
 - By default, /calc replies are public so teammates can see compositions. You can pass hidden:true to receive the result privately (ephemeral). Admin commands and error/config messages remain ephemeral.
+- Auto-delete: Non-ephemeral /calc messages are automatically deleted after 10 minutes by default. Admins can change this with `/admin set-message-ttl-minutes <N>` or set to `0` to disable.
 
 ## Make the bot private
 There are two layers you can use, together or separately:
