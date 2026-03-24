@@ -15,6 +15,8 @@ Features:
   - Archer Total Amount
   - March Count
   - Whether the user is calling rallies
+  - Optional: Max March Size override (affects ratio-mode threshold)
+  - Optional: Hidden (make response ephemeral)
 - Produces a concise table for:
   - Joining March (Archers, Infantry, Cavalry)
   - Calling March (Archers, Infantry, Cavalry) if the user is a caller
@@ -26,7 +28,14 @@ Features:
 Given:
 - Server settings: Max Troop Size (MTS), Infantry Amount (INF), Max Archers Amount (MAA)
 - User input: Total Archers (TA), March Count (MC), Calling (C boolean)
+- Optional: Max March Size override (MMS)
 
+Ratio mode switch (caller only):
+- If TA > (MC * MAA) + extra AND you are the caller, we switch to ratio mode only for the caller march and show 1% Infantry, 9% Cavalry, 90% Archers.
+- Joining marches remain in normal mode with numeric values.
+- extra defaults to 120,000. If you provide Max March Size (MMS), extra becomes floor(0.9 * MMS) to account for 90% archers on the caller march.
+
+Normal mode:
 1. Caller archer value for joining marches:
    - Divisor = MC + (1 if C else 0)
    - Base = floor(TA / Divisor)
@@ -41,7 +50,7 @@ Given:
    - Archers = min( TA - (caller archer value * MC), MTS - Infantry )
    - Cavalry = Rest (i.e., MTS - Infantry - Archers)
 
-Joining march archers are rounded down to the nearest 1000. The calling march is not rounded.
+Joining march archers are rounded down to the nearest 1000 only when you are the caller. If you are not calling, joining march archers are not rounded. The calling march is never rounded.
 
 ## Commands
 - `/calc archer_total:<int> march_count:<int> calling:<bool>`
@@ -50,6 +59,9 @@ Joining march archers are rounded down to the nearest 1000. The calling march is
 - `/admin set-max-archers-amount <int>`
 - `/admin show-settings`
 - `/admin set-admin <@user>`
+- `/admin set-calc-message <text>` (message appended to every /calc result)
+- `/admin clear-calc-message` (remove the message)
+- `/admin resync-commands` (force re-sync of slash commands if they appear outdated)
 
 Admin checks: The first user who runs any command in a guild becomes admin automatically. Only the admin can use `/admin` commands.
 
@@ -90,7 +102,36 @@ Per-guild settings are stored in JSON at `/data/guild_settings.json`. The contai
 ## Permissions and Best Practices
 - The bot requests only the Guilds intent.
 - Uses slash commands (interactions) and defers message content.
-- /calc replies are public so teammates can see compositions. Admin commands and error/config messages remain ephemeral.
+- By default, /calc replies are public so teammates can see compositions. You can pass hidden:true to receive the result privately (ephemeral). Admin commands and error/config messages remain ephemeral.
+
+## Make the bot private
+There are two layers you can use, together or separately:
+
+1) Discord setting: make the application/bot non-public
+- In Discord Developer Portal → Your App → Bot → Bot Permissions, disable the toggle "Public Bot" (also labeled "Requires OAuth2 Code Grant" in some UIs; ensure Public is OFF).
+- With Public Bot OFF, only users with the invite URL or appropriate permissions can add the bot; it will not be listed in the App Directory.
+
+2) Runtime allowlist: restrict to specific server IDs
+- Set the environment variable `ALLOWED_GUILDS` to a comma-separated list of guild (server) IDs. Example:
+  - ALLOWED_GUILDS=123456789012345678,987654321098765432
+- Behavior when ALLOWED_GUILDS is set:
+  - The bot will only respond in those servers.
+  - It will auto-leave any other server it is invited to.
+- Where to find a Guild ID: Enable Developer Mode in Discord → Right-click the server icon → Copy Server ID.
+
+Examples:
+- Docker Compose (docker-compose.yml):
+  environment:
+    - DISCORD_TOKEN=${DISCORD_TOKEN}
+    - LOG_LEVEL=INFO
+    - DATA_DIR=/data
+    - ALLOWED_GUILDS=123456789012345678,987654321098765432
+
+- Raw Docker:
+  docker run -e DISCORD_TOKEN=... -e ALLOWED_GUILDS=123,456 -v bearbot-data:/data --restart unless-stopped ghcr.io/rliebi/discord-bear-bot:latest
+
+Optional: Make your container image private
+- In GitHub → Packages → your image (ghcr.io/rliebi/discord-bear-bot), you can change the package visibility to Private. Consumers must docker login ghcr.io to pull.
 
 ## Troubleshooting
 - Commands not visible: Ensure the bot has the application.commands scope authorized in your server, and wait up to a minute for global sync. We also force sync on startup.
@@ -146,3 +187,22 @@ Contributions are welcome via pull requests. Please keep changes minimal and foc
 
 ## License
 This project is licensed under the Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0) license. See LICENSE for details.
+
+
+## Running multiple instances (important)
+What happens if you run multiple containers of the same bot token at once?
+- Discord will allow multiple gateway connections for the same bot token. Without coordination, each instance will receive the same interactions and likely respond twice (duplicate messages), and admin auto-assignment or settings writes can race.
+
+To prevent this by default, this project includes a simple singleton guard:
+- On startup, the bot tries to acquire an exclusive file lock at `${DATA_DIR}/bot.lock`.
+- If the lock is already held (another instance is running against the same data directory), this instance exits with an error.
+- This protects you from accidental duplicate instances on the same host or on any cluster setup where `/data` is a shared volume.
+
+Advanced: allow multiple instances (not recommended unless you know why)
+- Set `ALLOW_MULTI_INSTANCE=true` to bypass the lock. Only do this if you are implementing proper sharding or otherwise ensuring that only one instance will handle a given interaction.
+- discord.py supports sharding, but this template does not set it up. If you need true horizontal scale, prefer a single replica per token or implement shard awareness explicitly.
+
+Recommendations
+- Docker Compose/Swarm: keep `replicas: 1` for this service.
+- If you need high availability, run a supervisor to restart on failure rather than running concurrent replicas of the same token.
+- If you run multiple nodes with a non-shared volume driver, the file lock will not coordinate across nodes. Use a shared volume for `/data` or keep replicas at 1 to avoid duplicates.

@@ -27,13 +27,15 @@ def compute_kingshot(g: GuildConfig, total_archers: int, march_count: int, is_ca
     if g.infantry_amount < 0 or g.max_archers_amount < 0:
         raise ValueError("Invalid server settings")
 
-    # Caller archer value for joining marches (rounded down to nearest 1000)
+    # Per-joiner archer value baseline
     divisor = march_count + (1 if is_caller else 0)
     base = total_archers // max(1, divisor)
     capped = min(base, g.max_archers_amount)
-    caller_archer_value = (capped // 1000) * 1000  # floor to 1000s for joiners
+    # Rounding rule: only round down to nearest 1000 if the user IS the caller.
+    # If not calling, do not round the joining march archers.
+    caller_archer_value = ((capped // 1000) * 1000) if is_caller else capped
 
-    # Joining march values (joining archers rounded to 1000)
+    # Joining march values (rounded to 1000 only when calling)
     joining_archers = caller_archer_value
     joining_infantry = g.infantry_amount
     joining_cavalry = max(0, g.max_troop_size - joining_archers - joining_infantry)

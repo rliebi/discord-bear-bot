@@ -8,6 +8,23 @@ from typing import Optional
 from src.storage import get_guild_settings, update_guild_settings, set_admin_if_unset
 from src.calculator import GuildConfig, compute_kingshot
 
+# Allowed guilds allowlist (optional). If set, the bot only works in these guild IDs and will leave others.
+_ALLOWED_GUILDS_ENV = os.environ.get("ALLOWED_GUILDS", "").strip()
+if _ALLOWED_GUILDS_ENV:
+    try:
+        ALLOWED_GUILDS = {int(x) for x in _ALLOWED_GUILDS_ENV.split(",") if x.strip()}
+    except ValueError:
+        ALLOWED_GUILDS = set()
+else:
+    ALLOWED_GUILDS = set()
+
+def is_guild_allowed(guild: Optional[discord.Guild]) -> bool:
+    if guild is None:
+        return False
+    if not ALLOWED_GUILDS:
+        return True  # no restrictions
+    return int(guild.id) in ALLOWED_GUILDS
+
 # Configure logging
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("bearbot")
@@ -37,6 +54,15 @@ class BearBot(commands.Bot):
         # Sync tree per guild on ready
         await self.tree.sync()
         logger.info("Slash commands synced")
+        # Optionally prune unauthorized guilds at startup if an allowlist is set
+        if ALLOWED_GUILDS:
+            for g in list(self.guilds):
+                if not is_guild_allowed(g):
+                    logger.warning(f"Leaving unauthorized guild {g.name} ({g.id}) due to ALLOWED_GUILDS policy")
+                    try:
+                        await g.leave()
+                    except Exception as e:
+                        logger.error(f"Failed to leave guild {g.id}: {e}")
 
 bot = BearBot()
 
@@ -47,12 +73,24 @@ bot = BearBot()
 @app_commands.describe(
     archer_total="Your total number of archers",
     march_count="How many joining marches (excluding caller march)",
-    calling="Are you the rally caller?"
+    calling="Are you the rally caller?",
+    max_march_size="Optional: override for threshold (uses 90% of this instead of 120k)",
+    hidden="Optional: if true, the response is visible only to you"
 )
-async def calc(interaction: discord.Interaction, archer_total: app_commands.Range[int, 0, 100000000], march_count: app_commands.Range[int, 1, 50], calling: bool):
+async def calc(
+    interaction: discord.Interaction,
+    archer_total: app_commands.Range[int, 0, 100000000],
+    march_count: app_commands.Range[int, 1, 50],
+    calling: bool,
+    max_march_size: Optional[app_commands.Range[int, 1000, 2000000]] = None,
+    hidden: Optional[bool] = False,
+):
     guild = interaction.guild
     if guild is None:
         await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+    if not is_guild_allowed(guild):
+        await interaction.response.send_message("This bot is private and not enabled for this server.", ephemeral=True)
         return
 
     s = get_guild_settings(guild.id)
@@ -63,6 +101,7 @@ async def calc(interaction: discord.Interaction, archer_total: app_commands.Rang
         infantry_amount=int(s.get("infantry_amount", 0)),
         max_archers_amount=int(s.get("max_archers_amount", 0)),
     )
+    calc_message = str(s.get("calc_message", "") or "").strip()
 
     # Validate server settings
     if g.max_troop_size <= 0 or g.infantry_amount < 0 or g.max_archers_amount < 0:
@@ -71,11 +110,13 @@ async def calc(interaction: discord.Interaction, archer_total: app_commands.Rang
         )
         return
 
-    try:
-        result = compute_kingshot(g, int(archer_total), int(march_count), bool(calling))
-    except Exception as e:
-        await interaction.response.send_message(f"Error: {e}", ephemeral=True)
-        return
+    # Ratio mode: if TA > (MC * MAA) + extra
+    # extra is 120k by default, or floor(0.9 * max_march_size) if provided by user
+    extra = 120000
+    if max_march_size is not None:
+        extra = int(0.9 * int(max_march_size))
+    threshold = (int(march_count) * int(g.max_archers_amount)) + extra
+    ratio_mode = int(archer_total) > threshold
 
     # Build response embed
     embed = discord.Embed(title="Kingshot Bear Troop Ratio", color=discord.Color.green())
@@ -84,30 +125,54 @@ async def calc(interaction: discord.Interaction, archer_total: app_commands.Rang
         f"Infantry Amount: {g.infantry_amount}\n"
         f"Max Archers Amount: {g.max_archers_amount}"
     ), inline=False)
-    embed.add_field(name="Your Input", value=(
-        f"Total Archers: {archer_total}\n"
-        f"March Count: {march_count}\n"
-        f"Rally Caller: {'Yes' if calling else 'No'}"
-    ), inline=False)
+    user_input_lines = [
+        f"Total Archers: {archer_total}",
+        f"March Count: {march_count}",
+        f"Rally Caller: {'Yes' if calling else 'No'}",
+    ]
+    if max_march_size is not None:
+        user_input_lines.append(f"Max March Size (override): {int(max_march_size)}")
+    embed.add_field(name="Your Input", value="\n".join(user_input_lines), inline=False)
 
-    # Joining march table
+    # Always compute normal results for accurate joining values (and calling when not in ratio mode)
+    try:
+        result = compute_kingshot(g, int(archer_total), int(march_count), bool(calling))
+    except Exception as e:
+        await interaction.response.send_message(f"Error: {e}", ephemeral=True)
+        return
+
+    # Joining march is always numeric (with 1000-floor and MAA cap per calculator)
     embed.add_field(name="Joining March (per march)", value=(
         f"Archers: {result.joining_archers}\n"
         f"Infantry: {result.joining_infantry}\n"
         f"Cavalry: {result.joining_cavalry}"
     ), inline=True)
 
-    # Calling march table
+    # Calling march: if ratio-mode AND user is caller → show 1/9/90. Otherwise show numeric result or N/A.
     if calling:
-        embed.add_field(name="Calling March", value=(
-            f"Archers: {result.calling_archers}\n"
-            f"Infantry: {result.calling_infantry}\n"
-            f"Cavalry: Rest"
-        ), inline=True)
+        if ratio_mode:
+            embed.add_field(name="Mode", value=f"Ratio mode (caller only). Trigger: TA > MC*MAA + extra = {march_count}*{g.max_archers_amount} + {extra} = {threshold}", inline=False)
+            embed.add_field(name="Calling March", value=(
+                "Archers: 90%\n"
+                "Infantry: 1%\n"
+                "Cavalry: Rest (≈9%)"
+            ), inline=True)
+        else:
+            embed.add_field(name="Calling March", value=(
+                f"Archers: {result.calling_archers}\n"
+                f"Infantry: {result.calling_infantry}\n"
+                f"Cavalry: Rest"
+            ), inline=True)
     else:
         embed.add_field(name="Calling March", value="N/A (not a caller)", inline=True)
 
-    await interaction.response.send_message(embed=embed, ephemeral=False)
+    # Optional server message
+    if calc_message:
+        # Discord embed field value limit is 1024; truncate if necessary
+        msg = calc_message if len(calc_message) <= 1024 else (calc_message[:1021] + "...")
+        embed.add_field(name="Message from Admin", value=msg, inline=False)
+
+    await interaction.response.send_message(embed=embed, ephemeral=bool(hidden))
 
 
 # Admin group
@@ -116,6 +181,12 @@ class AdminGroup(app_commands.Group):
         super().__init__(name="admin", description="Admin configuration commands")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return False
+        if not is_guild_allowed(interaction.guild):
+            await interaction.response.send_message("This bot is private and not enabled for this server.", ephemeral=True)
+            return False
         if not is_admin_check(interaction):
             await interaction.response.send_message("Only the configured admin can use this.", ephemeral=True)
             return False
@@ -138,11 +209,28 @@ class AdminGroup(app_commands.Group):
         s = update_guild_settings(interaction.guild.id, {"max_archers_amount": v})
         await interaction.response.send_message(f"Max Archers Amount set to {s['max_archers_amount']}", ephemeral=True)
 
+    @app_commands.command(name="set-calc-message", description="Set a message to include with every /calc result")
+    @app_commands.describe(message="Text to show with every calculation (suggest ≤ 1000 chars)")
+    async def set_calc_message(self, interaction: discord.Interaction, message: str):
+        msg = (message or "").strip()
+        # Discord embed field limit is 1024; allow longer but inform about truncation
+        update_guild_settings(interaction.guild.id, {"calc_message": msg})
+        preview = msg if len(msg) <= 140 else (msg[:137] + "...")
+        note = " (will be truncated in embeds)" if len(msg) > 1024 else ""
+        await interaction.response.send_message(f"Calculation message set to: {preview}{note}", ephemeral=True)
+
+    @app_commands.command(name="clear-calc-message", description="Clear the message shown with /calc results")
+    async def clear_calc_message(self, interaction: discord.Interaction):
+        update_guild_settings(interaction.guild.id, {"calc_message": ""})
+        await interaction.response.send_message("Calculation message cleared.", ephemeral=True)
+
     @app_commands.command(name="show-settings", description="Show current server settings")
     async def show_settings(self, interaction: discord.Interaction):
         s = get_guild_settings(interaction.guild.id)
+        calc_msg = (s.get("calc_message") or "").strip()
+        calc_msg_status = "(not set)" if not calc_msg else ((calc_msg if len(calc_msg) <= 140 else calc_msg[:137] + "...") )
         await interaction.response.send_message(
-            f"Admin: <@{s['admin_user_id']}>\nMax Troop Size: {s['max_troop_size']}\nInfantry Amount: {s['infantry_amount']}\nMax Archers Amount: {s['max_archers_amount']}",
+            f"Admin: <@{s['admin_user_id']}>\nMax Troop Size: {s['max_troop_size']}\nInfantry Amount: {s['infantry_amount']}\nMax Archers Amount: {s['max_archers_amount']}\nCalc Message: {calc_msg_status}",
             ephemeral=True,
         )
 
@@ -150,6 +238,25 @@ class AdminGroup(app_commands.Group):
     async def set_admin(self, interaction: discord.Interaction, user: discord.User):
         s = update_guild_settings(interaction.guild.id, {"admin_user_id": int(user.id)})
         await interaction.response.send_message(f"Admin set to <@{s['admin_user_id']}>", ephemeral=True)
+
+    @app_commands.command(name="resync-commands", description="Force re-sync of slash commands (use if commands look outdated)")
+    async def resync_commands(self, interaction: discord.Interaction):
+        # Try guild-scoped sync first for speed, then global as fallback
+        try:
+            await interaction.response.defer(ephemeral=True)
+            synced_guild = await interaction.client.tree.sync(guild=interaction.guild)
+            # Also ensure global sync happens in background
+            try:
+                synced_global = await interaction.client.tree.sync()
+            except Exception as eg:
+                logger.warning(f"Global sync failed: {eg}")
+                synced_global = []
+            await interaction.followup.send(
+                f"Slash commands re-synced. Guild commands: {len(synced_guild)}, Global commands: {len(synced_global)}.",
+                ephemeral=True,
+            )
+        except Exception as e:
+            await interaction.followup.send(f"Failed to sync commands: {e}", ephemeral=True)
 
 
 bot.tree.add_command(AdminGroup())
@@ -160,11 +267,31 @@ async def on_ready():
     logger.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
     logger.info("------")
 
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    # If an allowlist is configured, automatically leave unauthorized guilds
+    if ALLOWED_GUILDS and not is_guild_allowed(guild):
+        logger.warning(f"Joined unauthorized guild {guild.name} ({guild.id}); leaving due to ALLOWED_GUILDS policy")
+        try:
+            await guild.leave()
+        except Exception as e:
+            logger.error(f"Failed to auto-leave guild {guild.id}: {e}")
+
 
 def main():
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
         raise SystemExit("DISCORD_TOKEN environment variable not set")
+
+    # Prevent multiple instances from running against the same data dir/token unless explicitly allowed
+    allow_multi = os.environ.get("ALLOW_MULTI_INSTANCE", "false").strip().lower() in {"1", "true", "yes"}
+    if not allow_multi:
+        try:
+            from src.singleton import setup_singleton_lock
+            setup_singleton_lock()
+        except Exception as e:
+            raise SystemExit(f"Another instance appears to be running (singleton lock failed): {e}")
+
     bot.run(token)
 
 

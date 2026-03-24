@@ -57,3 +57,17 @@ The bot in this project only needs minimal intents.
 ## 8) Production Tips
 - Run inside Docker with a persistent volume for `/data` so server settings persist across restarts.
 - Keep your token in a secret store (GitHub Actions Secrets, Docker Swarm secrets, etc.).
+
+## 9) Make your application private
+There are two parts:
+
+A) Discord Developer Portal settings
+- Go to Your App → Bot.
+- Turn OFF the "Public Bot" toggle so your bot isn’t publicly addable or listed in the App Directory.
+- Do not enable the App Directory listing for your application.
+- Share your OAuth2 invite URL only with trusted server owners.
+
+B) Runtime restriction in this project (allowlist)
+- Set the env var `ALLOWED_GUILDS` to a comma-separated list of server IDs you control.
+- The bot will auto-leave any other server and refuse to respond there.
+- Getting a server (guild) ID: Enable Developer Mode in Discord → Right‑click server → Copy Server ID.
