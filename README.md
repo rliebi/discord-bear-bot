@@ -104,7 +104,7 @@ Per-guild settings are stored in JSON at `/data/guild_settings.json`. The contai
 - The bot requests only the Guilds intent.
 - Uses slash commands (interactions) and defers message content.
 - By default, /calc replies are public so teammates can see compositions. You can pass hidden:true to receive the result privately (ephemeral). Admin commands and error/config messages remain ephemeral.
-- Auto-delete: Non-ephemeral /calc messages are automatically deleted after 10 minutes by default. Admins can change this with `/admin set-message-ttl-minutes <N>` or set to `0` to disable.
+- Auto-delete: Non-ephemeral /calc messages are automatically deleted after 10 minutes by default. Admins can change this with `/admin set-message-ttl-minutes <N>` or set to `0` to disable. When auto-delete is enabled, the /calc embed shows a footer indicating in how many minutes it will be deleted.
 
 ## Make the bot private
 There are two layers you can use, together or separately:

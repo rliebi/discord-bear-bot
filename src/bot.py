@@ -191,23 +191,36 @@ async def calc(
         msg = calc_message if len(calc_message) <= 1024 else (calc_message[:1021] + "...")
         embed.add_field(name="Message from Admin", value=msg, inline=False)
 
+    # If this message will be auto-deleted (non-ephemeral and TTL > 0), add a footer notice
+    if (not bool(hidden)) and (ttl_minutes > 0):
+        unit = "minute" if int(ttl_minutes) == 1 else "minutes"
+        embed.set_footer(text=f"Auto-delete: this message will be deleted in approximately {ttl_minutes} {unit}.")
+
     # Send response first (without delete_after to ensure reliability on interactions)
     await interaction.response.send_message(embed=embed, ephemeral=bool(hidden))
 
     # Auto-delete after configured TTL (minutes) for non-ephemeral messages; 0 means do not delete
     if (not bool(hidden)) and (ttl_seconds is not None):
-        async def _del_later(inter: discord.Interaction, delay: int):
-            try:
-                await asyncio.sleep(delay)
-                with contextlib.suppress(Exception):
-                    await inter.delete_original_response()
-            except Exception as e:
-                logger.warning(f"Auto-delete task error: {e}")
         try:
-            asyncio.create_task(_del_later(interaction, ttl_seconds))
-        except RuntimeError:
-            # Fallback if no running loop (shouldn't happen inside command handler)
-            pass
+            # Obtain the created message object now, while the interaction context is fresh
+            msg = await interaction.original_response()
+        except Exception as e:
+            logger.warning(f"Could not fetch original response message for auto-delete: {e}")
+            msg = None
+
+        if msg is not None:
+            async def _del_later(message: discord.Message, delay: int):
+                try:
+                    await asyncio.sleep(delay)
+                    with contextlib.suppress(Exception):
+                        await message.delete()
+                except Exception as e:
+                    logger.warning(f"Auto-delete task error: {e}")
+            try:
+                asyncio.create_task(_del_later(msg, ttl_seconds))
+            except RuntimeError:
+                # Fallback if no running loop (shouldn't happen inside command handler)
+                pass
 
 
 # Admin group

@@ -49,7 +49,7 @@ Use the slash command:
 
 Note: By default, /calc results are posted publicly in the channel so your team can coordinate. Set `hidden:true` to receive the result privately. Admin commands remain ephemeral.
 
-Auto-delete: Non-ephemeral /calc messages are automatically deleted after 10 minutes by default. Admins can change the timeout with `/admin set-message-ttl-minutes <N>` or set it to `0` to disable auto-deletion.
+Auto-delete: Non-ephemeral /calc messages are automatically deleted after 10 minutes by default. Admins can change the timeout with `/admin set-message-ttl-minutes <N>` or set it to `0` to disable auto-deletion. When auto-delete is enabled (TTL > 0) and the response is public, the result embed includes a footer telling you in how many minutes it will be deleted.
 
 ### Ratio Mode (automatic, caller only)
 We switch to simple ratio guidance only for the CALLING march when you have a surplus of archers:
