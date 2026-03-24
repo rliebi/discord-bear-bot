@@ -7,6 +7,7 @@ from typing import Optional
 
 from src.storage import get_guild_settings, update_guild_settings, set_admin_if_unset
 from src.calculator import GuildConfig, compute_kingshot
+from src.imagegen import render_calc_card
 
 # Allowed guilds allowlist (optional). If set, the bot only works in these guild IDs and will leave others.
 _ALLOWED_GUILDS_ENV = os.environ.get("ALLOWED_GUILDS", "").strip()
@@ -75,7 +76,12 @@ bot = BearBot()
     march_count="How many joining marches (excluding caller march)",
     calling="Are you the rally caller?",
     max_march_size="Optional: override for threshold (uses 90% of this instead of 120k)",
-    hidden="Optional: if true, the response is visible only to you"
+    hidden="Optional: if true, the response is visible only to you",
+    with_image="Optional: also attach an image card with the results",
+    image_hidden="Optional: if true, the image is sent only to you (ephemeral)",
+    hero1="Optional: Hero name 1 to print on the image",
+    hero2="Optional: Hero name 2 to print on the image",
+    hero3="Optional: Hero name 3 to print on the image",
 )
 async def calc(
     interaction: discord.Interaction,
@@ -84,6 +90,11 @@ async def calc(
     calling: bool,
     max_march_size: Optional[app_commands.Range[int, 1000, 2000000]] = None,
     hidden: Optional[bool] = False,
+    with_image: Optional[bool] = False,
+    image_hidden: Optional[bool] = True,
+    hero1: Optional[str] = None,
+    hero2: Optional[str] = None,
+    hero3: Optional[str] = None,
 ):
     guild = interaction.guild
     if guild is None:
@@ -173,6 +184,50 @@ async def calc(
         embed.add_field(name="Message from Admin", value=msg, inline=False)
 
     await interaction.response.send_message(embed=embed, ephemeral=bool(hidden))
+
+    # Optional: attach an image card with the same content
+    if with_image:
+        try:
+            heroes = [h for h in [hero1, hero2, hero3] if h]
+            server_settings_text = (
+                f"Max Troop Size: {g.max_troop_size}\n"
+                f"Infantry Amount: {g.infantry_amount}\n"
+                f"Max Archers Amount: {g.max_archers_amount}"
+            )
+            user_input_text = "\n".join(user_input_lines)
+            joining_text = (
+                f"Archers: {result.joining_archers}\n"
+                f"Infantry: {result.joining_infantry}\n"
+                f"Cavalry: {result.joining_cavalry}"
+            )
+            if calling and ratio_mode:
+                calling_text = "Archers: 90%\nInfantry: 1%\nCavalry: Rest (≈9%)"
+            elif calling:
+                calling_text = (
+                    f"Archers: {result.calling_archers}\n"
+                    f"Infantry: {result.calling_infantry}\n"
+                    f"Cavalry: Rest"
+                )
+            else:
+                calling_text = "N/A (not a caller)"
+
+            footer = None
+            if calc_message:
+                footer = calc_message if len(calc_message) <= 180 else (calc_message[:177] + "...")
+
+            img_bytes = render_calc_card(
+                title="Kingshot Bear Troop Ratio",
+                server_settings=server_settings_text,
+                user_input=user_input_text,
+                joining_text=joining_text,
+                calling_text=calling_text,
+                footer=footer,
+                heroes=heroes,
+            )
+            file = discord.File(fp=img_bytes, filename="kingshot_calc.png")
+            await interaction.followup.send(content=None, file=file, ephemeral=bool(image_hidden))
+        except Exception as e:
+            logger.error(f"Failed to render/send image: {e}")
 
 
 # Admin group

@@ -10,6 +10,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 # Workdir
 WORKDIR /app
 
+# System deps for image rendering (fonts for Pillow)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
 # Install python deps
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt

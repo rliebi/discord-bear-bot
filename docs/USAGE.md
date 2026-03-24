@@ -34,13 +34,16 @@ Example setup:
 ## Users: Calculate Marches
 Use the slash command:
 ```
-/calc archer_total:<int> march_count:<int> calling:<true|false> [max_march_size:<int>] [hidden:<true|false>]
+/calc archer_total:<int> march_count:<int> calling:<true|false> [max_march_size:<int>] [hidden:<true|false>] [with_image:<true|false>] [image_hidden:<true|false>] [hero1:<text>] [hero2:<text>] [hero3:<text>]
 ```
 - archer_total: Your total number of archers
 - march_count: How many joining marches you plan to send
 - calling: true if you will call a rally, false otherwise
 - max_march_size (optional): Overrides the extra buffer used for ratio-mode; extra becomes floor(0.9 × max_march_size) instead of the default 120,000.
 - hidden (optional): If true, the response is visible only to you (ephemeral). Defaults to public.
+- with_image (optional): If true, the bot also attaches a PNG card with the results.
+- image_hidden (optional): If true, the image is sent ephemerally as a follow-up (useful if your main result is public).
+- hero1..3 (optional): Hero names to print on the image for quick reference.
 
 ### What you get back
 - Joining March table: Archers, Infantry, Cavalry for each joining march

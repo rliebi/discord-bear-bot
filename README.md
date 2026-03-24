@@ -17,6 +17,7 @@ Features:
   - Whether the user is calling rallies
   - Optional: Max March Size override (affects ratio-mode threshold)
   - Optional: Hidden (make response ephemeral)
+  - Optional: With Image (attach a PNG card with the results, plus optional hero names)
 - Produces a concise table for:
   - Joining March (Archers, Infantry, Cavalry)
   - Calling March (Archers, Infantry, Cavalry) if the user is a caller
@@ -132,6 +133,15 @@ Examples:
 
 Optional: Make your container image private
 - In GitHub → Packages → your image (ghcr.io/rliebi/discord-bear-bot), you can change the package visibility to Private. Consumers must docker login ghcr.io to pull.
+
+## Screenshot OCR feasibility (future option)
+It is feasible to parse a screenshot of your troop screen and auto-fill the /calc inputs, but it is a non-trivial feature. A pragmatic roadmap:
+- MVP: Add a new command `/calc-from-shot screenshot:<attachment>` that runs local OCR (Tesseract via pytesseract) to read the three unit counts (Archers/Infantry/Cavalry) and the current/maximum march size numbers from known positions; compute with the existing logic; ask you to confirm parsed values before posting. All processing happens in-memory; images are not stored.
+- Accuracy: Works well with standard English UI and common resolutions. For other languages or themes, we’ll need language packs or PaddleOCR and some template matching, which increases image size and build time.
+- Performance: On typical Docker CPU, a single screenshot parse takes ~100–300ms with Tesseract. PaddleOCR may take longer and add ~100–200MB to the image.
+- Privacy: We will not persist the image; add an option to auto-delete the message after parsing if desired.
+
+If you want this, provide 3–5 representative screenshots (varied devices/resolutions/languages) so we can tune the parser. Until then, you can already attach an auto-rendered PNG of the result via `/calc with_image:true` and optional hero names.
 
 ## Troubleshooting
 - Commands not visible: Ensure the bot has the application.commands scope authorized in your server, and wait up to a minute for global sync. We also force sync on startup.
