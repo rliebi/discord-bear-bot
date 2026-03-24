@@ -41,6 +41,8 @@ Use the slash command:
 - Joining March table: Archers, Infantry, Cavalry for each joining march
 - Calling March table: shown only if calling=true. Provides an Archer/Inf/Cav composition for your caller march
 
+Note: /calc results are posted publicly in the channel where you run the command so your team can see and coordinate. Admin commands stay ephemeral.
+
 ### Calculation Summary
 Given server settings MTS, INF, MAA and user input TA, MC, Calling:
 1) Caller archer value for joining marches

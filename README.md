@@ -90,12 +90,13 @@ Per-guild settings are stored in JSON at `/data/guild_settings.json`. The contai
 ## Permissions and Best Practices
 - The bot requests only the Guilds intent.
 - Uses slash commands (interactions) and defers message content.
-- Replies to users ephemerally for privacy.
+- /calc replies are public so teammates can see compositions. Admin commands and error/config messages remain ephemeral.
 
 ## Troubleshooting
 - Commands not visible: Ensure the bot has the application.commands scope authorized in your server, and wait up to a minute for global sync. We also force sync on startup.
 - 401/unauthorized: Verify `DISCORD_TOKEN` is correct and the bot is invited to the guild.
 - State not saved: Ensure the `/data` volume is mounted and writable by the container user.
+- Docker volume chown error: If you see an error like "failed to chown ... operation not permitted" when deploying with a named volume, note that this image now runs as root and does not chown or pre-create `/data` at build time. This avoids permission changes on the mounted volume. Re-deploy with the latest image and ensure your orchestrator mounts the volume to `/data` (default).
 
 ## Development quickstart (local and Docker)
 We provide a Makefile with handy targets.

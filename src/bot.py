@@ -107,7 +107,7 @@ async def calc(interaction: discord.Interaction, archer_total: app_commands.Rang
     else:
         embed.add_field(name="Calling March", value="N/A (not a caller)", inline=True)
 
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(embed=embed, ephemeral=False)
 
 
 # Admin group
