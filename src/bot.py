@@ -1397,6 +1397,74 @@ async def on_guild_join(guild: discord.Guild):
         logger.warning(f"Guild-scoped sync on join failed for {guild.id}: {e}")
 
 
+async def _start_bot_with_retries(token: str) -> None:
+    """Start the Discord bot with resilient retry handling for login rate limits (HTTP 429).
+
+    This prevents the process from exiting when Discord rate limits the /users/@me login call
+    (error code 40062). Uses exponential backoff with max cap and jitter.
+    """
+    delay = 3.0
+    max_delay = 300.0  # 5 minutes cap
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            logger.info("Starting Discord bot (attempt %d)...", attempt)
+            await bot.start(token, reconnect=True)
+            # bot.start only returns after bot.close is called (shutdown). Exit loop.
+            return
+        except discord.errors.LoginFailure as e:
+            # Invalid token or auth issue: do not retry endlessly.
+            logger.error("Login failed: %s", e)
+            raise
+        except discord.errors.HTTPException as e:
+            status = getattr(e, 'status', None)
+            code = getattr(e, 'code', None)
+            if status == 429 or code == 40062:
+                jitter = random.uniform(0, min(5.0, delay))
+                sleep_for = min(max_delay, delay) + jitter
+                logger.warning(
+                    "Login rate limited (status=%s, code=%s). Retrying in %.1f seconds...",
+                    status, code, sleep_for,
+                )
+                await asyncio.sleep(sleep_for)
+                delay = min(max_delay, delay * 2.0)
+                continue
+            # Other HTTP errors: log and retry with a modest backoff as they may be transient
+            jitter = random.uniform(0, 2.0)
+            sleep_for = min(max_delay, max(5.0, delay)) + jitter
+            logger.warning(
+                "HTTP error during bot start (status=%s, code=%s): %s. Retrying in %.1f seconds...",
+                status, code, e, sleep_for,
+            )
+            await asyncio.sleep(sleep_for)
+            delay = min(max_delay, delay * 1.5)
+            continue
+        except Exception as e:
+            # Unexpected error. Log and retry with backoff to avoid crash loops.
+            jitter = random.uniform(0, 2.0)
+            sleep_for = min(max_delay, max(5.0, delay)) + jitter
+            logger.error("Unexpected error during bot start: %s. Retrying in %.1f seconds...", e, sleep_for)
+            await asyncio.sleep(sleep_for)
+            delay = min(max_delay, delay * 1.5)
+
+
+async def _async_main(token: str) -> None:
+    # Register graceful shutdown to delete pending messages and cancel timers
+    try:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(_shutdown_cleanup(s.name)))
+            except NotImplementedError:
+                # Signals not supported (e.g., on Windows); ignore
+                pass
+    except Exception as e:
+        logger.debug(f"Signal handler setup failed or unsupported: {e}")
+
+    await _start_bot_with_retries(token)
+
+
 def main():
     token = os.environ.get("DISCORD_TOKEN")
     if not token:
@@ -1411,19 +1479,8 @@ def main():
         except Exception as e:
             raise SystemExit(f"Another instance appears to be running (singleton lock failed): {e}")
 
-    # Register graceful shutdown to delete pending messages and cancel timers
-    try:
-        loop = asyncio.get_event_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(_shutdown_cleanup(s.name)))
-            except NotImplementedError:
-                # Signals not supported (e.g., on Windows); ignore
-                pass
-    except Exception as e:
-        logger.debug(f"Signal handler setup failed or unsupported: {e}")
-
-    bot.run(token)
+    # Run the async main with our retrying starter
+    asyncio.run(_async_main(token))
 
 
 if __name__ == "__main__":
