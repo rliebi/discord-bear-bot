@@ -157,11 +157,19 @@ async def fetch_kvk_seasons(kingdom_id: int) -> List[dict]:
             data = await _http_get_json(session, url, params={"kingdomId": int(kingdom_id)})
         except Exception:
             data = await _http_get_json(session, url, params={"kingdom": int(kingdom_id)})
-    # Expect list of seasons; normalize
-    if isinstance(data, dict) and "items" in data and isinstance(data["items"], list):
-        return data["items"]
+    # Normalize response shapes
     if isinstance(data, list):
         return data
+    if isinstance(data, dict):
+        if isinstance(data.get("data"), list):
+            return data["data"]
+        if isinstance(data.get("items"), list):
+            return data["items"]
+        inner = data.get("data")
+        if isinstance(inner, dict):
+            for key in ("items", "results", "list"):
+                if isinstance(inner.get(key), list):
+                    return inner[key]
     # Unknown format
     raise RuntimeError("Unexpected API response format for KVK seasons")
 
@@ -648,26 +656,60 @@ class KvkGroup(app_commands.Group):
         if not seasons:
             await interaction.followup.send(f"No KVK seasons found for kingdom {k}.", ephemeral=True)
             return
-        items = seasons[:lim]
-        # Build embed
-        title = f"KVK Seasons for Kingdom {k}"
-        embed = discord.Embed(title=title, color=discord.Color.orange())
+
+        # Optional: sort by most recent first using season_date (fallback to season_id)
+        try:
+            seasons_sorted = sorted(
+                seasons,
+                key=lambda x: (x.get("season_date") or str(x.get("season_id") or "")),
+                reverse=True,
+            )
+        except Exception:
+            seasons_sorted = seasons
+
+        items = seasons_sorted[:lim]
+
+        embed = discord.Embed(title=f"KVK Seasons for Kingdom {k}", color=discord.Color.orange())
         for idx, it in enumerate(items, start=1):
-            # Try to grab common fields; fall back gracefully
-            name = str(it.get("name") or it.get("season") or it.get("kvkId") or f"Season {idx}")
-            start = it.get("start") or it.get("startDate") or it.get("start_time") or "?"
-            end = it.get("end") or it.get("endDate") or it.get("end_time") or "?"
-            kvk_type = it.get("type") or it.get("kvkType") or it.get("format")
-            result = it.get("result") or it.get("winner") or it.get("outcome")
-            value_lines = []
-            if kvk_type:
-                value_lines.append(f"Type: {kvk_type}")
-            value_lines.append(f"Start: {start}")
-            if end:
-                value_lines.append(f"End: {end}")
-            if result:
-                value_lines.append(f"Result: {result}")
-            embed.add_field(name=f"{idx}. {name}", value="\n".join(value_lines)[:1024], inline=False)
+            title = (
+                str(it.get("kvk_title")
+                    or (f"KvK #{it.get('season_id')}" if it.get('season_id') is not None else None)
+                    or f"KVK {it.get('kvk_id') or idx}")
+            )
+
+            date = it.get("season_date") or it.get("created_at") or it.get("updated_at") or "?"
+            kingdoms = f"{it.get('kingdom_a', '?')} vs {it.get('kingdom_b', '?')}"
+
+            winners_bits = []
+            if it.get("prep_winner") is not None:
+                winners_bits.append(f"Prep: {it['prep_winner']}")
+            if it.get("castle_winner") is not None:
+                winners_bits.append(f"Castle: {it['castle_winner']}")
+            winners = " | ".join(winners_bits) if winners_bits else None
+
+            extra_bits = []
+            if it.get("attacker") is not None:
+                extra_bits.append(f"Attacker: {it['attacker']}")
+            if it.get("defender") is not None:
+                extra_bits.append(f"Defender: {it['defender']}")
+            if "castle_captured" in it:
+                extra_bits.append(f"Castle captured: {'Yes' if it['castle_captured'] else 'No'}")
+
+            desc = it.get("description")
+
+            value_lines = [
+                f"Match: {kingdoms}",
+                f"Date: {date}",
+            ]
+            if winners:
+                value_lines.append(f"Winners: {winners}")
+            if extra_bits:
+                value_lines.append("; ".join(extra_bits))
+            if desc:
+                value_lines.append(f"Note: {desc}")
+
+            embed.add_field(name=f"{idx}. {title}", value="\n".join(value_lines)[:1024], inline=False)
+
         await interaction.followup.send(embed=embed, ephemeral=bool(hidden))
 
 
