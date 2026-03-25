@@ -149,14 +149,18 @@ async def _http_get_json(session: aiohttp.ClientSession, url: str, params: Optio
             raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
         return await resp.json()
 
-async def fetch_kvk_seasons(kingdom_id: int) -> List[dict]:
-    # Try with expected param kingdomId; if fails, try fallback 'kingdom'
-    url = f"{_API_BASE}/kvk/seasons"
+async def fetch_kvk_seasons(kingdom_id: int, limit: Optional[int] = None) -> List[dict]:
+    # Uses /kvk/matches and filters by kingdom_a only, as the API supports filtering only on kingdom_a.
+    url = f"{_API_BASE}/kvk/matches"
+    params = {
+        "kingdom_a": int(kingdom_id),
+        "status": "all",
+        "page": 1,
+    }
+    if isinstance(limit, int) and limit > 0:
+        params["limit"] = int(limit)
     async with aiohttp.ClientSession(headers={"Accept": "application/json"}) as session:
-        try:
-            data = await _http_get_json(session, url, params={"kingdomId": int(kingdom_id)})
-        except Exception:
-            data = await _http_get_json(session, url, params={"kingdom": int(kingdom_id)})
+        data = await _http_get_json(session, url, params=params)
     # Normalize response shapes
     if isinstance(data, list):
         return data
@@ -171,7 +175,7 @@ async def fetch_kvk_seasons(kingdom_id: int) -> List[dict]:
                 if isinstance(inner.get(key), list):
                     return inner[key]
     # Unknown format
-    raise RuntimeError("Unexpected API response format for KVK seasons")
+    raise RuntimeError("Unexpected API response format for KVK matches")
 
 
 @bot.tree.command(name="calc", description="Calculate Kingshot Bear Troop Ratio for your marches")
@@ -649,7 +653,7 @@ class KvkGroup(app_commands.Group):
         lim = int(limit) if limit is not None else 10
         try:
             await interaction.response.defer(ephemeral=bool(hidden))
-            seasons = await fetch_kvk_seasons(k)
+            seasons = await fetch_kvk_seasons(k, lim)
         except Exception as e:
             await interaction.followup.send(f"Failed to fetch KVK seasons for kingdom {k}: {e}", ephemeral=True)
             return
@@ -669,7 +673,41 @@ class KvkGroup(app_commands.Group):
 
         items = seasons_sorted[:lim]
 
-        embed = discord.Embed(title=f"KVK Seasons for Kingdom {k}", color=discord.Color.orange())
+        # Compute overall record from the perspective of the requested kingdom
+        wins = losses = draws = unknown = 0
+        outcomes: List[str] = []  # per-item outcome label
+        for it in items:
+            ka = it.get("kingdom_a")
+            kb = it.get("kingdom_b")
+            cw = it.get("castle_winner")
+            pw = it.get("prep_winner")
+            winner = cw if cw is not None else pw
+            if winner is None:
+                # Try infer from castle_captured with attacker/defender if provided
+                if it.get("castle_captured") is True:
+                    winner = it.get("attacker") or it.get("castle_winner") or it.get("prep_winner")
+            # Determine outcome for kingdom k
+            if winner is None or (ka is None and kb is None):
+                unknown += 1
+                outcomes.append("?")
+            else:
+                if int(winner) == int(k):
+                    wins += 1
+                    outcomes.append("W")
+                else:
+                    # If the kingdom participated and wasn't the winner, count as loss; if not present, unknown
+                    if int(k) in {int(ka) if ka is not None else -1, int(kb) if kb is not None else -2}:
+                        losses += 1
+                        outcomes.append("L")
+                    else:
+                        unknown += 1
+                        outcomes.append("?")
+
+        # Choose an embed color based on record
+        color = discord.Color.green() if wins > losses else (discord.Color.red() if losses > wins else discord.Color.orange())
+        embed = discord.Embed(title=f"KVK Matches for Kingdom {k}", color=color)
+        embed.description = f"Record: {wins}-{losses}" + (f"-{draws}" if draws else "") + (f"  |  Unknown: {unknown}" if unknown else "")
+
         for idx, it in enumerate(items, start=1):
             title = (
                 str(it.get("kvk_title")
@@ -678,37 +716,50 @@ class KvkGroup(app_commands.Group):
             )
 
             date = it.get("season_date") or it.get("created_at") or it.get("updated_at") or "?"
-            kingdoms = f"{it.get('kingdom_a', '?')} vs {it.get('kingdom_b', '?')}"
+            ka = it.get('kingdom_a')
+            kb = it.get('kingdom_b')
+            kingdoms = f"{ka if ka is not None else '?'} vs {kb if kb is not None else '?'}"
 
-            winners_bits = []
-            if it.get("prep_winner") is not None:
-                winners_bits.append(f"Prep: {it['prep_winner']}")
-            if it.get("castle_winner") is not None:
-                winners_bits.append(f"Castle: {it['castle_winner']}")
-            winners = " | ".join(winners_bits) if winners_bits else None
+            cw = it.get("castle_winner")
+            pw = it.get("prep_winner")
+            winner = cw if cw is not None else pw
+            # Loser = the other side if winner present
+            loser = None
+            if winner is not None and (ka is not None or kb is not None):
+                if int(winner) == int(ka if ka is not None else -1):
+                    loser = kb
+                elif int(winner) == int(kb if kb is not None else -1):
+                    loser = ka
 
-            extra_bits = []
-            if it.get("attacker") is not None:
-                extra_bits.append(f"Attacker: {it['attacker']}")
-            if it.get("defender") is not None:
-                extra_bits.append(f"Defender: {it['defender']}")
+            # Perspective outcome for k
+            outcome = outcomes[idx-1] if idx-1 < len(outcomes) else "?"
+            emoji = "🏆" if outcome == "W" else ("❌" if outcome == "L" else "❔")
+            outcome_str = f"{emoji} {'Win' if outcome=='W' else ('Loss' if outcome=='L' else 'Unknown')} for {k}"
+
+            bits = []
+            if winner is not None:
+                bits.append(f"Winner: **{winner}**")
+                if loser is not None:
+                    bits.append(f"Loser: **{loser}**")
+            if it.get("attacker") is not None or it.get("defender") is not None:
+                bits.append(f"⚔️ Attacker: {it.get('attacker','?')} | 🛡️ Defender: {it.get('defender','?')}")
             if "castle_captured" in it:
-                extra_bits.append(f"Castle captured: {'Yes' if it['castle_captured'] else 'No'}")
+                bits.append(f"🏰 Castle captured: {'✅' if it['castle_captured'] else '❌'}")
 
             desc = it.get("description")
 
             value_lines = [
-                f"Match: {kingdoms}",
+                f"Match: **{kingdoms}**",
                 f"Date: {date}",
+                outcome_str,
             ]
-            if winners:
-                value_lines.append(f"Winners: {winners}")
-            if extra_bits:
-                value_lines.append("; ".join(extra_bits))
+            if bits:
+                value_lines.append(" | ".join(bits))
             if desc:
                 value_lines.append(f"Note: {desc}")
 
-            embed.add_field(name=f"{idx}. {title}", value="\n".join(value_lines)[:1024], inline=False)
+            field_name = f"{idx}. {title}"
+            embed.add_field(name=field_name, value="\n".join(value_lines)[:1024], inline=False)
 
         await interaction.followup.send(embed=embed, ephemeral=bool(hidden))
 
