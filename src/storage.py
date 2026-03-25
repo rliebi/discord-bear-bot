@@ -161,3 +161,57 @@ def get_user_usage(guild_id: int, user_id: int) -> Optional[Dict[str, Any]]:
         if uid in usage:
             return dict(usage[uid])
         return None
+
+
+def get_all_guilds_usage(limit_per_guild: int = 20) -> Dict[int, List[Tuple[int, Dict[str, Any]]]]:
+    """Return per-guild top usage lists across all stored guilds.
+
+    Output: { guild_id: [(user_id, info dict), ...] }
+    Each list is sorted by usage count desc and truncated to limit_per_guild if > 0.
+    """
+    with _lock:
+        data = _read_all()
+        result: Dict[int, List[Tuple[int, Dict[str, Any]]]] = {}
+        for gid_str, gval in data.items():
+            try:
+                gid = int(gid_str)
+            except Exception:
+                continue
+            usage = (gval or {}).get("usage") or {}
+            items: List[Tuple[int, Dict[str, Any]]] = []
+            for uid_str, info in usage.items():
+                try:
+                    items.append((int(uid_str), dict(info)))
+                except Exception:
+                    continue
+            items.sort(key=lambda x: int(x[1].get("count", 0)), reverse=True)
+            if limit_per_guild > 0:
+                items = items[:limit_per_guild]
+            result[gid] = items
+        return result
+
+
+def get_global_top_users(limit: int = 20) -> List[Tuple[Tuple[int, int], Dict[str, Any]]]:
+    """Return top users across all guilds by count.
+
+    Output: [((guild_id, user_id), info dict), ...] sorted by count desc.
+    """
+    with _lock:
+        data = _read_all()
+        items: List[Tuple[Tuple[int, int], Dict[str, Any]]] = []
+        for gid_str, gval in data.items():
+            try:
+                gid = int(gid_str)
+            except Exception:
+                continue
+            usage = (gval or {}).get("usage") or {}
+            for uid_str, info in usage.items():
+                try:
+                    uid = int(uid_str)
+                except Exception:
+                    continue
+                items.append(((gid, uid), dict(info)))
+        items.sort(key=lambda x: int(x[1].get("count", 0)), reverse=True)
+        if limit > 0:
+            items = items[:limit]
+        return items

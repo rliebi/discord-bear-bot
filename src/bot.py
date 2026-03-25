@@ -14,6 +14,7 @@ from src.storage import (
     record_usage_event,
     get_usage_summary,
     get_user_usage,
+    get_all_guilds_usage,
 )
 from src.calculator import GuildConfig, compute_kingshot
 
@@ -377,6 +378,45 @@ class AdminGroup(app_commands.Group):
             await interaction.response.send_message(out, ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"Failed to fetch usage: {e}", ephemeral=True)
+
+    @app_commands.command(name="usage-all-servers", description="Show top usage for all servers (this bot across all guilds)")
+    @app_commands.describe(limit_per_guild="Number of top users per server to list (default 5)")
+    async def usage_all_servers(self, interaction: discord.Interaction, limit_per_guild: Optional[app_commands.Range[int,1,50]] = 5):
+        try:
+            lim = int(limit_per_guild) if limit_per_guild is not None else 5
+            all_usage = get_all_guilds_usage(lim)
+            if not all_usage:
+                await interaction.response.send_message("No usage recorded in any server yet.", ephemeral=True)
+                return
+            lines = []
+            client = interaction.client
+            for gid, items in all_usage.items():
+                # Resolve guild name
+                gobj = client.get_guild(int(gid)) if hasattr(client, "get_guild") else None
+                gname = gobj.name if gobj is not None else None
+                if not gname:
+                    # Fallback to last_server_name from first user entry if present
+                    if items:
+                        gname = items[0][1].get("last_server_name") or str(gid)
+                    else:
+                        gname = str(gid)
+                lines.append(f"Server: {gname} ({gid})")
+                if not items:
+                    lines.append("  - no usage")
+                    continue
+                for idx, (uid, info) in enumerate(items, start=1):
+                    disp = info.get("user_display") or f"<@{uid}>"
+                    count = int(info.get("count", 0))
+                    last_ts = info.get("last_use_ts", "?")
+                    last_arch = info.get("last_total_archers", "?")
+                    last_join = info.get("last_joining_archers", "?")
+                    lines.append(f"  {idx}. <@{uid}> ({disp}): {count} uses | last UTC: {last_ts} | TA: {last_arch} | joinA: {last_join}")
+            out = "\n".join(lines)
+            if len(out) > 1800:
+                out = out[:1797] + "..."
+            await interaction.response.send_message(out, ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"Failed to fetch all-servers usage: {e}", ephemeral=True)
 
     @app_commands.command(name="set-admin", description="Set or change the admin user")
     async def set_admin(self, interaction: discord.Interaction, user: discord.User):

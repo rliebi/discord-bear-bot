@@ -25,6 +25,10 @@ Commands:
 - `/admin resync-commands` (force a re-sync of slash commands if Discord shows them as outdated)
 - `/admin set-message-ttl-minutes <int>` (auto-delete /calc messages after N minutes; 0 disables)
 
+## Admin: Usage stats
+- `/admin usage [user:@User] [limit:<int>]` Show usage for this server. Omit `user` to see top users.
+- `/admin usage-all-servers [limit_per_guild:<int>]` Show top usage per server across all servers this bot is in.
+
 Example setup:
 ```
 /admin set-max-troop-size 300000
