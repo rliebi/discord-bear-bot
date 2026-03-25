@@ -55,6 +55,8 @@ Note: By default, /calc results are posted publicly in the channel so your team 
 
 Auto-delete: Non-ephemeral /calc messages are automatically deleted after 10 minutes by default. Admins can change the timeout with `/admin set-message-ttl-minutes <N>` or set it to `0` to disable auto-deletion. When auto-delete is enabled (TTL > 0) and the response is public, the result embed includes a footer telling you in how many minutes it will be deleted.
 
+Graceful shutdown: When the bot is stopped (e.g., container/app shutdown), any pending auto-delete timers are cancelled and the bot will attempt to immediately delete all messages that were scheduled for deletion. This reduces the chance that result messages linger if the app restarts before timers fire.
+
 ### Ratio Mode (automatic, caller only)
 We switch to simple ratio guidance only for the CALLING march when you have a surplus of archers:
 - Condition: `TA > (MC × MAA) + extra` AND `calling = true`
@@ -121,6 +123,15 @@ Assume server settings: MTS=300000, INF=20000, MAA=160000
 - Joining March = Archers 133000, Infantry 20000, Cavalry 147000
 - Calling March Archers = min(400000 - (133000*2)=134000, 300000-20000=280000) = 134000
 - Calling March Cavalry = 300000 - 20000 - 134000 = 146000
+
+## Last: Show your most recent calculation
+Use the slash command:
+```
+/last [hidden:<true|false>]
+```
+- hidden (optional): If true, the response is visible only to you (ephemeral). Defaults to hidden.
+
+This shows your most recent /calc inputs and outputs in this server. If you haven’t used /calc yet here, it will tell you there’s no previous calculation.
 
 ## Running multiple instances
 - Avoid running multiple replicas of the same bot token at the same time. Discord will deliver the same interactions to all of them, causing duplicate replies.

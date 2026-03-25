@@ -2,6 +2,7 @@ import os
 import logging
 import asyncio
 import contextlib
+import signal
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -38,6 +39,50 @@ def is_guild_allowed(guild: Optional[discord.Guild]) -> bool:
 # Configure logging
 logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("bearbot")
+
+# Track pending auto-delete tasks and their target messages so we can clean them up on shutdown
+_PENDING_DELETE_TASKS: "set[asyncio.Task]" = set()
+_PENDING_DELETE_TARGETS: "set[tuple[int,int]]" = set()  # (channel_id, message_id)
+_shutdown_in_progress = False
+
+async def _delete_message_by_ids(client: discord.Client, channel_id: int, message_id: int) -> None:
+    chan = client.get_channel(int(channel_id))
+    if chan is None:
+        with contextlib.suppress(Exception):
+            chan = await client.fetch_channel(int(channel_id))  # type: ignore[attr-defined]
+    if hasattr(chan, "fetch_message"):
+        with contextlib.suppress(Exception):
+            m = await chan.fetch_message(int(message_id))  # type: ignore[assignment]
+            await m.delete()
+
+async def _shutdown_cleanup(signal_name: str) -> None:
+    global _shutdown_in_progress
+    if _shutdown_in_progress:
+        return
+    _shutdown_in_progress = True
+    try:
+        # Try to delete all pending targets immediately
+        targets = list(_PENDING_DELETE_TARGETS)
+        if targets:
+            logger.info(f"Shutdown: deleting {len(targets)} pending messages before exit (signal={signal_name})")
+        for chan_id, msg_id in targets:
+            with contextlib.suppress(Exception):
+                await _delete_message_by_ids(bot, chan_id, msg_id)
+            with contextlib.suppress(Exception):
+                _PENDING_DELETE_TARGETS.discard((chan_id, msg_id))
+        # Cancel all pending deletion tasks
+        tasks = list(_PENDING_DELETE_TASKS)
+        for t in tasks:
+            with contextlib.suppress(Exception):
+                t.cancel()
+        if tasks:
+            with contextlib.suppress(Exception):
+                await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("Shutdown: cleanup complete. Closing bot.")
+        with contextlib.suppress(Exception):
+            await bot.close()
+    finally:
+        pass
 
 INTENTS = discord.Intents.none()
 INTENTS.guilds = True
@@ -247,24 +292,102 @@ async def calc(
                     return
                 # Attempt 2: fetch the message via the bot token and delete it
                 if msg_id is not None and chan_id is not None:
-                    chan = interaction.client.get_channel(chan_id)
-                    # Fallback: try to fetch the channel via API if not cached
-                    if chan is None:
+                    try:
+                        await _delete_message_by_ids(interaction.client, chan_id, msg_id)
+                    finally:
                         with contextlib.suppress(Exception):
-                            chan = await interaction.client.fetch_channel(chan_id)  # type: ignore[attr-defined]
-                    if hasattr(chan, "fetch_message"):
-                        with contextlib.suppress(Exception):
-                            m = await chan.fetch_message(msg_id)  # type: ignore[assignment]
-                            await m.delete()
+                            _PENDING_DELETE_TARGETS.discard((int(chan_id), int(msg_id)))
             except Exception as e:
                 logger.warning(f"Auto-delete task error: {e}")
+            finally:
+                # Ensure target is cleaned up even if we returned early via webhook delete
+                if msg_id is not None and chan_id is not None:
+                    with contextlib.suppress(Exception):
+                        _PENDING_DELETE_TARGETS.discard((int(chan_id), int(msg_id)))
 
+        # Register this message as a pending deletion target if we have both IDs
+        if (message_id is not None) and (channel_id is not None):
+            with contextlib.suppress(Exception):
+                _PENDING_DELETE_TARGETS.add((int(channel_id), int(message_id)))
         try:
-            asyncio.create_task(_del_later_v2(ttl_seconds, message_id, channel_id))
+            t = asyncio.create_task(_del_later_v2(ttl_seconds, message_id, channel_id))
+            with contextlib.suppress(Exception):
+                _PENDING_DELETE_TASKS.add(t)
+                t.add_done_callback(lambda _t: _PENDING_DELETE_TASKS.discard(_t))
         except RuntimeError:
             # Fallback if no running loop (shouldn't happen inside command handler)
             pass
 
+
+@bot.tree.command(name="last", description="Show your last Kingshot calculation in this server")
+@app_commands.describe(hidden="Optional: if true, the response is visible only to you")
+async def last(
+    interaction: discord.Interaction,
+    hidden: Optional[bool] = True,
+):
+    guild = interaction.guild
+    if guild is None:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+    if not is_guild_allowed(guild):
+        await interaction.response.send_message("This bot is private and not enabled for this server.", ephemeral=True)
+        return
+
+    try:
+        u = get_user_usage(int(guild.id), int(interaction.user.id))
+    except Exception as e:
+        await interaction.response.send_message(f"Failed to load last calculation: {e}", ephemeral=True)
+        return
+
+    if not u:
+        await interaction.response.send_message(
+            "No previous calculation found. Use /calc to create one.",
+            ephemeral=bool(hidden),
+        )
+        return
+
+    # Build an embed summarizing the last calculation stored for this user in this server
+    title = "Your Last Kingshot Calculation"
+    embed = discord.Embed(title=title, color=discord.Color.blue())
+
+    # Timestamp and server info
+    last_ts = u.get("last_use_ts", "?")
+    server_name = u.get("last_server_name", str(guild.name))
+    server_id = u.get("last_server_id", int(guild.id))
+    mts = u.get("last_server_max_troop_size", "?")
+    embed.add_field(name="Server", value=f"{server_name} ({server_id})", inline=True)
+    embed.add_field(name="When (UTC)", value=str(last_ts), inline=True)
+    embed.add_field(name="Max Troop Size", value=str(mts), inline=True)
+
+    # Inputs
+    ta = u.get("last_total_archers", "?")
+    mc = u.get("last_march_count", "?")
+    calling = bool(u.get("last_calling", False))
+    embed.add_field(
+        name="Input",
+        value=f"Total Archers: {ta}\nMarch Count: {mc}\nRally Caller: {'Yes' if calling else 'No'}",
+        inline=False,
+    )
+
+    # Outputs
+    join_a = u.get("last_joining_archers", "?")
+    call_a = u.get("last_calling_archers", 0)
+    embed.add_field(
+        name="Joining March (per march)",
+        value=f"Archers: {join_a}",
+        inline=True,
+    )
+    if calling:
+        embed.add_field(
+            name="Calling March",
+            value=f"Archers: {call_a}",
+            inline=True,
+        )
+    else:
+        embed.add_field(name="Calling March", value="N/A (not a caller)", inline=True)
+
+    # Respond (default to ephemeral=True unless user requests otherwise)
+    await interaction.response.send_message(embed=embed, ephemeral=bool(hidden))
 
 # Admin group
 class AdminGroup(app_commands.Group):
@@ -483,6 +606,18 @@ def main():
             setup_singleton_lock()
         except Exception as e:
             raise SystemExit(f"Another instance appears to be running (singleton lock failed): {e}")
+
+    # Register graceful shutdown to delete pending messages and cancel timers
+    try:
+        loop = asyncio.get_event_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, lambda s=sig: asyncio.create_task(_shutdown_cleanup(s.name)))
+            except NotImplementedError:
+                # Signals not supported (e.g., on Windows); ignore
+                pass
+    except Exception as e:
+        logger.debug(f"Signal handler setup failed or unsupported: {e}")
 
     bot.run(token)
 
