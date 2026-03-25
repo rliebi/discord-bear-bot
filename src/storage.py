@@ -50,6 +50,7 @@ def get_guild_settings(guild_id: int) -> Dict[str, Any]:
         g.setdefault("calc_message", "")
         g.setdefault("message_ttl_minutes", 10)
         g.setdefault("kingdom_id", None)
+        g.setdefault("bear_event_last_start", "")  # UTC date string YYYY-MM-DD for daily cooldown
         # Usage stats container per guild
         g.setdefault("usage", {})  # { user_id: {count, last_use_ts, ...} }
         data[gid] = g
@@ -82,6 +83,7 @@ def set_admin_if_unset(guild_id: int, user_id: int) -> Optional[int]:
             g.setdefault("calc_message", "")
             g.setdefault("message_ttl_minutes", 10)
             g.setdefault("kingdom_id", None)
+            g.setdefault("bear_event_last_start", "")
             g.setdefault("usage", {})
             data[gid] = g
             _write_all(data)

@@ -8,6 +8,8 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from typing import Optional, Any, List
+from datetime import datetime, timezone, timedelta
+import random
 
 from src.storage import (
     get_guild_settings,
@@ -765,6 +767,472 @@ class KvkGroup(app_commands.Group):
 
 
 bot.tree.add_command(KvkGroup())
+
+
+# --- Bear Mini-Game ---
+# Event: lasts 30 minutes. Once per day per guild. Users can launch 5-minute rallies and others can join.
+# Each user can participate in up to 6 rallies per event (launch counts as 1). Points are random for now.
+
+from typing import Dict, Set, Tuple
+
+class _BearEventState:
+    def __init__(self, guild_id: int, channel_id: int, start: datetime, end: datetime):
+        self.guild_id = int(guild_id)
+        self.channel_id = int(channel_id)
+        self.start = start
+        self.end = end
+        self.rallies: Dict[int, dict] = {}
+        self.next_rally_id: int = 1
+        self.user_points: Dict[int, int] = {}
+        self.user_joins: Dict[int, int] = {}
+        self.lock = asyncio.Lock()
+        self.end_task: Optional[asyncio.Task] = None
+
+    def time_left_seconds(self) -> int:
+        now = datetime.now(timezone.utc)
+        return max(0, int((self.end - now).total_seconds()))
+
+_BEAR_EVENTS: Dict[int, _BearEventState] = {}
+
+
+def _fmt_duration(sec: int) -> str:
+    m, s = divmod(max(0, int(sec)), 60)
+    return f"{m}m {s}s"
+
+async def _announce(channel: Optional[discord.abc.Messageable], content: Optional[str] = None, embed: Optional[discord.Embed] = None):
+    if channel is None:
+        return
+    with contextlib.suppress(Exception):
+        await channel.send(content=content, embed=embed)
+
+class LaunchRallyView(discord.ui.View):
+    def __init__(self, guild_id: int, timeout: Optional[float] = None):
+        # timeout in seconds; default to event remaining time
+        super().__init__(timeout=timeout)
+        self.guild_id = int(guild_id)
+
+    @discord.ui.button(label="Launch Rally", style=discord.ButtonStyle.primary, emoji="🚩")
+    async def launch_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Reuse the /bear launch logic, but invoked via button
+        guild = interaction.guild
+        if guild is None or int(guild.id) != self.guild_id:
+            await interaction.response.send_message("This button is not valid here.", ephemeral=True)
+            return
+        ev = _BEAR_EVENTS.get(int(guild.id))
+        if ev is None or ev.time_left_seconds() <= 0:
+            await interaction.response.send_message("No active Bear event. Ask an admin to /bear start.", ephemeral=True)
+            return
+        uid = int(interaction.user.id)
+        async with ev.lock:
+            if int(ev.user_joins.get(uid, 0)) >= 6:
+                await interaction.response.send_message("You reached the 6 rally participation limit for this event.", ephemeral=True)
+                return
+            rid = ev.next_rally_id
+            ev.next_rally_id += 1
+            now = datetime.now(timezone.utc)
+            rally_end = now + timedelta(minutes=5)
+            r = {
+                "id": rid,
+                "title": f"Rally #{rid}",
+                "caller_id": uid,
+                "start": now,
+                "end": rally_end,
+                "participants": set([uid]),
+                "done": False,
+                "task": None,
+                "message_id": None,
+                "channel_id": int(interaction.channel.id) if interaction.channel else None,
+            }
+            ev.rallies[rid] = r
+            ev.user_joins[uid] = int(ev.user_joins.get(uid, 0)) + 1
+
+        # Build and send rally message with Join view
+        now = datetime.now(timezone.utc)
+        embed = discord.Embed(title=f"🚩 Rally Launched (ID {rid})", color=discord.Color.blurple())
+        embed.add_field(name="Title", value=r["title"], inline=False)
+        embed.add_field(name="Caller", value=f"<@{uid}>", inline=True)
+        embed.add_field(name="Rallying For", value=_fmt_duration(int((rally_end - now).total_seconds())), inline=True)
+        embed.set_footer(text="Click Join to join this rally (5 min window)")
+        join_view = JoinRallyView(guild_id=int(guild.id), rally_id=int(rid), timeout=max(1, int((rally_end - now).total_seconds())))
+        await interaction.response.send_message(embed=embed, view=join_view)
+        try:
+            imsg = await interaction.original_response()
+            async with ev.lock:
+                ev.rallies[rid]["message_id"] = int(imsg.id)
+        except Exception:
+            pass
+
+        async def _finish_rally(gid: int, rally_id: int, rally_end_dt: datetime):
+            try:
+                await asyncio.sleep(max(0, int((rally_end_dt - datetime.now(timezone.utc)).total_seconds())))
+                ev2 = _BEAR_EVENTS.get(int(gid))
+                if ev2 is None:
+                    return
+                async with ev2.lock:
+                    r2 = ev2.rallies.get(int(rally_id))
+                    if not r2 or r2.get("done"):
+                        return
+                    r2["done"] = True
+                    participants = set(r2.get("participants") or [])
+                    for pid in participants:
+                        pts = random.randint(8, 15) if pid == r2.get("caller_id") else random.randint(5, 12)
+                        ev2.user_points[pid] = int(ev2.user_points.get(pid, 0)) + int(pts)
+                ch = bot.get_channel(ev2.channel_id) if ev2 and ev2.channel_id else interaction.channel
+                names = [f"<@{pid}>" for pid in list(participants)[:20]]
+                extra = "" if len(participants) <= 20 else f" and {len(participants)-20} more"
+                res = discord.Embed(title=f"✅ Rally Resolved (ID {rally_id})", color=discord.Color.green())
+                res.description = f"Participants ({len(participants)}): " + (", ".join(names) + extra if names else "None")
+                res.add_field(name="Scoring", value="Caller: 8–15 pts | Joiners: 5–12 pts (random)", inline=False)
+                await _announce(ch, embed=res)
+            except Exception as e:
+                logger.debug(f"_finish_rally (button) error: {e}")
+        try:
+            t = asyncio.create_task(_finish_rally(int(guild.id), int(rid), rally_end))
+            with contextlib.suppress(Exception):
+                ev.rallies[rid]["task"] = t
+                _PENDING_DELETE_TASKS.add(t)
+                t.add_done_callback(lambda _t: _PENDING_DELETE_TASKS.discard(_t))
+        except RuntimeError:
+            pass
+
+
+class JoinRallyView(discord.ui.View):
+    def __init__(self, guild_id: int, rally_id: int, timeout: Optional[float] = None):
+        super().__init__(timeout=timeout)
+        self.guild_id = int(guild_id)
+        self.rally_id = int(rally_id)
+
+    @discord.ui.button(label="Join", style=discord.ButtonStyle.success, emoji="➕")
+    async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        if guild is None or int(guild.id) != self.guild_id:
+            await interaction.response.send_message("This button is not valid here.", ephemeral=True)
+            return
+        ev = _BEAR_EVENTS.get(int(guild.id))
+        if ev is None or ev.time_left_seconds() <= 0:
+            await interaction.response.send_message("No active Bear event.", ephemeral=True)
+            return
+        uid = int(interaction.user.id)
+        async with ev.lock:
+            if int(ev.user_joins.get(uid, 0)) >= 6:
+                await interaction.response.send_message("You have reached the 6 rally participation limit for this event.", ephemeral=True)
+                return
+            r = ev.rallies.get(int(self.rally_id))
+            if not r:
+                await interaction.response.send_message(f"Rally {int(self.rally_id)} not found.", ephemeral=True)
+                return
+            if r.get("done"):
+                await interaction.response.send_message(f"Rally {int(self.rally_id)} has already finished.", ephemeral=True)
+                return
+            if datetime.now(timezone.utc) >= r.get("end"):
+                await interaction.response.send_message(f"Rally {int(self.rally_id)} is no longer rallying.", ephemeral=True)
+                return
+            parts = r.get("participants")
+            if uid in parts:
+                await interaction.response.send_message("You are already in this rally.", ephemeral=True)
+                return
+            parts.add(uid)
+            ev.user_joins[uid] = int(ev.user_joins.get(uid, 0)) + 1
+            left = max(0, 6 - int(ev.user_joins.get(uid, 0)))
+        # Update the rally message with new participant count if we can fetch it
+        try:
+            msg = await interaction.original_response()
+            # If this button interaction is tied to the message, editing the message's embed is optional. We'll just ack.
+        except Exception:
+            pass
+        await interaction.response.send_message(f"Joined rally {int(self.rally_id)}! You can still join {left} more rally(ies) this event.", ephemeral=True)
+
+
+class BearGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="bear", description="Bear mini-game: daily 30-min rally event")
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return False
+        if not is_guild_allowed(interaction.guild):
+            await interaction.response.send_message("This bot is private and not enabled for this server.", ephemeral=True)
+            return False
+        return True
+
+    @app_commands.command(name="start", description="Start today's 30-minute Bear event (admin only; once per day)")
+    async def start(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        if not is_admin_check(interaction):
+            await interaction.response.send_message("Only the configured admin can start the event.", ephemeral=True)
+            return
+        s = get_guild_settings(guild.id)
+        today = datetime.now(timezone.utc).date().isoformat()
+        last = (s.get("bear_event_last_start") or "").strip()
+        if last == today:
+            await interaction.response.send_message("Today's Bear event has already been started. Try again tomorrow.", ephemeral=True)
+            return
+        # Prevent duplicate events if one is active
+        if _BEAR_EVENTS.get(int(guild.id)) is not None and _BEAR_EVENTS[int(guild.id)].time_left_seconds() > 0:
+            await interaction.response.send_message("An event is already active in this server.", ephemeral=True)
+            return
+        start_ts = datetime.now(timezone.utc)
+        end_ts = start_ts + timedelta(minutes=30)
+        chan = interaction.channel
+        st = _BearEventState(guild.id, int(chan.id) if chan else 0, start_ts, end_ts)
+        _BEAR_EVENTS[int(guild.id)] = st
+        update_guild_settings(guild.id, {"bear_event_last_start": today})
+
+        embed = discord.Embed(title="🐻 Bear Event Started!", color=discord.Color.gold())
+        embed.description = (
+            "For the next 30 minutes, launch rallies (5 min) to attack the fictional bear!\n"
+            "Join rallies to earn points. You can participate in up to 6 rallies total.\n"
+            "Use the button below to launch a rally, or use /bear launch."
+        )
+        embed.add_field(name="Ends In", value=_fmt_duration(int((end_ts - start_ts).total_seconds())), inline=True)
+        # Attach a Launch button view that times out when the event ends
+        view = LaunchRallyView(guild_id=int(guild.id), timeout=max(1, int((end_ts - start_ts).total_seconds())))
+        await interaction.response.send_message(embed=embed, view=view)
+
+        async def _end_event_later(gid: int, until: datetime):
+            try:
+                await asyncio.sleep(max(0, int((until - datetime.now(timezone.utc)).total_seconds())))
+                ev = _BEAR_EVENTS.get(int(gid))
+                if ev is None:
+                    return
+                # Mark as ended; do not delete immediately to allow late status/leaderboard
+                end_embed = discord.Embed(title="🐻 Bear Event Ended", color=discord.Color.dark_grey())
+                # Build quick leaderboard top 10
+                tops = sorted(ev.user_points.items(), key=lambda kv: kv[1], reverse=True)[:10]
+                if tops:
+                    lines = [f"{idx+1}. <@{uid}> — {pts} pts" for idx, (uid, pts) in enumerate(tops)]
+                    end_embed.add_field(name="Top Players", value="\n".join(lines), inline=False)
+                else:
+                    end_embed.description = (end_embed.description or "") + "\nNo points scored."
+                ch = bot.get_channel(ev.channel_id) if ev.channel_id else interaction.channel
+                await _announce(ch, embed=end_embed)
+            finally:
+                pass
+        try:
+            t = asyncio.create_task(_end_event_later(int(guild.id), end_ts))
+            st.end_task = t
+            with contextlib.suppress(Exception):
+                _PENDING_DELETE_TASKS.add(t)
+                t.add_done_callback(lambda _t: _PENDING_DELETE_TASKS.discard(_t))
+        except RuntimeError:
+            pass
+
+    @app_commands.command(name="reset", description="Admin: reset the Bear event now (cancels timers and clears daily cooldown)")
+    async def reset(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        if not is_admin_check(interaction):
+            await interaction.response.send_message("Only the configured admin can reset the event.", ephemeral=True)
+            return
+        gid = int(guild.id)
+        ev = _BEAR_EVENTS.get(gid)
+        # Cancel running tasks safely
+        if ev is not None:
+            with contextlib.suppress(Exception):
+                if ev.end_task:
+                    ev.end_task.cancel()
+            with contextlib.suppress(Exception):
+                if isinstance(ev.rallies, dict):
+                    for r in list(ev.rallies.values()):
+                        t = r.get("task") if isinstance(r, dict) else None
+                        if t:
+                            with contextlib.suppress(Exception):
+                                t.cancel()
+            with contextlib.suppress(Exception):
+                del _BEAR_EVENTS[gid]
+        # Clear daily cooldown to allow restart
+        with contextlib.suppress(Exception):
+            update_guild_settings(gid, {"bear_event_last_start": ""})
+        # Notify
+        embed = discord.Embed(title="♻️ Bear Event Reset", color=discord.Color.red())
+        embed.description = "The current event (if any) was reset. You can /bear start again now."
+        ch = interaction.channel
+        if ch is not None:
+            await _announce(ch, embed=embed)
+        await interaction.response.send_message("Event reset complete.", ephemeral=True)
+
+    @app_commands.command(name="launch", description="Launch a 5-minute rally to the bear (counts toward your 6 joins)")
+    @app_commands.describe(title="Optional short title for your rally")
+    async def launch(self, interaction: discord.Interaction, title: Optional[str] = None):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        ev = _BEAR_EVENTS.get(int(guild.id))
+        if ev is None or ev.time_left_seconds() <= 0:
+            await interaction.response.send_message("No active Bear event. Ask an admin to /bear start.", ephemeral=True)
+            return
+        uid = int(interaction.user.id)
+        async with ev.lock:
+            if int(ev.user_joins.get(uid, 0)) >= 6:
+                await interaction.response.send_message("You have reached the 6 rally participation limit for this event.", ephemeral=True)
+                return
+            rid = ev.next_rally_id
+            ev.next_rally_id += 1
+            now = datetime.now(timezone.utc)
+            rally_end = now + timedelta(minutes=5)
+            r = {
+                "id": rid,
+                "title": (title or f"Rally #{rid}")[:80],
+                "caller_id": uid,
+                "start": now,
+                "end": rally_end,
+                "participants": set([uid]),
+                "done": False,
+                "task": None,
+            }
+            ev.rallies[rid] = r
+            ev.user_joins[uid] = int(ev.user_joins.get(uid, 0)) + 1
+
+        embed = discord.Embed(title=f"🚩 Rally Launched (ID {rid})", color=discord.Color.blurple())
+        embed.add_field(name="Title", value=r["title"], inline=False)
+        embed.add_field(name="Caller", value=f"<@{uid}>", inline=True)
+        embed.add_field(name="Rallying For", value=_fmt_duration(int((rally_end - now).total_seconds())), inline=True)
+        embed.set_footer(text="Click Join to join this rally (5 min window)")
+        join_view = JoinRallyView(guild_id=int(guild.id), rally_id=int(rid), timeout=max(1, int((rally_end - now).total_seconds())))
+        await interaction.response.send_message(embed=embed, view=join_view)
+        try:
+            imsg = await interaction.original_response()
+            async with ev.lock:
+                ev.rallies[rid]["message_id"] = int(imsg.id)
+                ev.rallies[rid]["channel_id"] = int(interaction.channel.id) if interaction.channel else None
+        except Exception:
+            pass
+
+        async def _finish_rally(gid: int, rally_id: int):
+            try:
+                await asyncio.sleep(max(0, int((rally_end - datetime.now(timezone.utc)).total_seconds())))
+                ev2 = _BEAR_EVENTS.get(int(gid))
+                if ev2 is None:
+                    return
+                async with ev2.lock:
+                    r2 = ev2.rallies.get(int(rally_id))
+                    if not r2 or r2.get("done"):
+                        return
+                    r2["done"] = True
+                    participants: Set[int] = set(r2.get("participants") or [])
+                    # Award random points
+                    for pid in participants:
+                        if pid == r2.get("caller_id"):
+                            pts = random.randint(8, 15)
+                        else:
+                            pts = random.randint(5, 12)
+                        ev2.user_points[pid] = int(ev2.user_points.get(pid, 0)) + int(pts)
+                # Announce result
+                ch = bot.get_channel(ev2.channel_id) if ev2 and ev2.channel_id else interaction.channel
+                names = []
+                for pid in list(participants)[:20]:
+                    names.append(f"<@{pid}>")
+                extra = "" if len(participants) <= 20 else f" and {len(participants)-20} more"
+                res = discord.Embed(title=f"✅ Rally Resolved (ID {rally_id})", color=discord.Color.green())
+                res.description = f"Participants ({len(participants)}): " + (", ".join(names) + extra if names else "None")
+                res.add_field(name="Scoring", value="Caller: 8–15 pts | Joiners: 5–12 pts (random)", inline=False)
+                await _announce(ch, embed=res)
+            except Exception as e:
+                logger.debug(f"_finish_rally error: {e}")
+        try:
+            t = asyncio.create_task(_finish_rally(int(guild.id), int(rid)))
+            with contextlib.suppress(Exception):
+                ev.rallies[rid]["task"] = t
+                _PENDING_DELETE_TASKS.add(t)
+                t.add_done_callback(lambda _t: _PENDING_DELETE_TASKS.discard(_t))
+        except RuntimeError:
+            pass
+
+    @app_commands.command(name="join", description="Join an active rally by ID (max 6 rallies per event)")
+    async def join(self, interaction: discord.Interaction, rally_id: app_commands.Range[int,1,1000000]):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        ev = _BEAR_EVENTS.get(int(guild.id))
+        if ev is None or ev.time_left_seconds() <= 0:
+            await interaction.response.send_message("No active Bear event.", ephemeral=True)
+            return
+        uid = int(interaction.user.id)
+        async with ev.lock:
+            if int(ev.user_joins.get(uid, 0)) >= 6:
+                await interaction.response.send_message("You have reached the 6 rally participation limit for this event.", ephemeral=True)
+                return
+            r = ev.rallies.get(int(rally_id))
+            if not r:
+                await interaction.response.send_message(f"Rally {int(rally_id)} not found.", ephemeral=True)
+                return
+            if r.get("done"):
+                await interaction.response.send_message(f"Rally {int(rally_id)} has already finished.", ephemeral=True)
+                return
+            # Check rally still rallying
+            if datetime.now(timezone.utc) >= r.get("end"):
+                await interaction.response.send_message(f"Rally {int(rally_id)} is no longer rallying.", ephemeral=True)
+                return
+            parts: Set[int] = r.get("participants")
+            if uid in parts:
+                await interaction.response.send_message("You are already in this rally.", ephemeral=True)
+                return
+            parts.add(uid)
+            ev.user_joins[uid] = int(ev.user_joins.get(uid, 0)) + 1
+            left = max(0, 6 - int(ev.user_joins.get(uid, 0)))
+            await interaction.response.send_message(f"Joined rally {int(rally_id)}! You can still join {left} more rally(ies) this event.", ephemeral=True)
+
+    @app_commands.command(name="status", description="Show current event status and your progress")
+    @app_commands.describe(hidden="If true, only you can see the response")
+    async def status(self, interaction: discord.Interaction, hidden: Optional[bool] = True):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        ev = _BEAR_EVENTS.get(int(guild.id))
+        if ev is None or ev.time_left_seconds() <= 0:
+            await interaction.response.send_message("No active Bear event.", ephemeral=True)
+            return
+        now = datetime.now(timezone.utc)
+        left = ev.time_left_seconds()
+        embed = discord.Embed(title="🐻 Bear Event Status", color=discord.Color.orange())
+        embed.add_field(name="Time Remaining", value=_fmt_duration(left), inline=True)
+        # List active rallies
+        lines = []
+        async with ev.lock:
+            for rid, r in sorted(ev.rallies.items()):
+                if r.get("done"):
+                    continue
+                rleft = max(0, int((r.get("end") - now).total_seconds()))
+                lines.append(f"ID {rid}: {r.get('title')} — {len(r.get('participants'))} joined — ends in {_fmt_duration(rleft)}")
+        embed.add_field(name="Active Rallies", value=("\n".join(lines) if lines else "None"), inline=False)
+        uid = int(interaction.user.id)
+        pts = int(ev.user_points.get(uid, 0))
+        joins = int(ev.user_joins.get(uid, 0))
+        embed.add_field(name="You", value=f"Points: {pts}\nRallies joined: {joins}/6", inline=True)
+        await interaction.response.send_message(embed=embed, ephemeral=bool(hidden))
+
+    @app_commands.command(name="leaderboard", description="Show the current event leaderboard")
+    @app_commands.describe(limit="How many top players to show (default 10)", hidden="If true, only you can see the response")
+    async def leaderboard(self, interaction: discord.Interaction, limit: Optional[app_commands.Range[int,1,25]] = 10, hidden: Optional[bool] = True):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        ev = _BEAR_EVENTS.get(int(guild.id))
+        if ev is None:
+            await interaction.response.send_message("No Bear event data available.", ephemeral=True)
+            return
+        lim = int(limit) if limit is not None else 10
+        tops = sorted(ev.user_points.items(), key=lambda kv: kv[1], reverse=True)[:lim]
+        embed = discord.Embed(title="🏅 Bear Event Leaderboard", color=discord.Color.green())
+        if not tops:
+            embed.description = "No points recorded yet. Launch or join a rally!"
+        else:
+            lines = [f"{idx+1}. <@{uid}> — {pts} pts" for idx, (uid, pts) in enumerate(tops)]
+            embed.add_field(name=f"Top {len(tops)}", value="\n".join(lines)[:1024], inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=bool(hidden))
+
+
+bot.tree.add_command(BearGroup())
 
 
 @bot.event
