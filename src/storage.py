@@ -49,6 +49,7 @@ def get_guild_settings(guild_id: int) -> Dict[str, Any]:
         g.setdefault("max_archers_amount", 0)
         g.setdefault("calc_message", "")
         g.setdefault("message_ttl_minutes", 10)
+        g.setdefault("kingdom_id", None)
         # Usage stats container per guild
         g.setdefault("usage", {})  # { user_id: {count, last_use_ts, ...} }
         data[gid] = g
@@ -80,6 +81,7 @@ def set_admin_if_unset(guild_id: int, user_id: int) -> Optional[int]:
             g.setdefault("max_archers_amount", 0)
             g.setdefault("calc_message", "")
             g.setdefault("message_ttl_minutes", 10)
+            g.setdefault("kingdom_id", None)
             g.setdefault("usage", {})
             data[gid] = g
             _write_all(data)

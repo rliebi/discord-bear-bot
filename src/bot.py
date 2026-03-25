@@ -3,10 +3,11 @@ import logging
 import asyncio
 import contextlib
 import signal
+import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
-from typing import Optional
+from typing import Optional, Any, List
 
 from src.storage import (
     get_guild_settings,
@@ -137,6 +138,32 @@ class BearBot(commands.Bot):
 bot = BearBot()
 
 
+# --- KVK API helpers ---
+_API_BASE = os.environ.get("KINGSHOT_API_BASE", "https://kingshot.net/api").rstrip("/")
+
+async def _http_get_json(session: aiohttp.ClientSession, url: str, params: Optional[dict] = None) -> Any:
+    timeout = aiohttp.ClientTimeout(total=10)
+    async with session.get(url, params=params or {}, timeout=timeout) as resp:
+        if resp.status != 200:
+            text = await resp.text()
+            raise RuntimeError(f"HTTP {resp.status}: {text[:200]}")
+        return await resp.json()
+
+async def fetch_kvk_seasons(kingdom_id: int) -> List[dict]:
+    # Try with expected param kingdomId; if fails, try fallback 'kingdom'
+    url = f"{_API_BASE}/kvk/seasons"
+    async with aiohttp.ClientSession(headers={"Accept": "application/json"}) as session:
+        try:
+            data = await _http_get_json(session, url, params={"kingdomId": int(kingdom_id)})
+        except Exception:
+            data = await _http_get_json(session, url, params={"kingdom": int(kingdom_id)})
+    # Expect list of seasons; normalize
+    if isinstance(data, dict) and "items" in data and isinstance(data["items"], list):
+        return data["items"]
+    if isinstance(data, list):
+        return data
+    # Unknown format
+    raise RuntimeError("Unexpected API response format for KVK seasons")
 
 
 @bot.tree.command(name="calc", description="Calculate Kingshot Bear Troop Ratio for your marches")
@@ -453,8 +480,10 @@ class AdminGroup(app_commands.Group):
         calc_msg_status = "(not set)" if not calc_msg else ((calc_msg if len(calc_msg) <= 140 else calc_msg[:137] + "...") )
         ttl = int(s.get("message_ttl_minutes", 10) or 0)
         ttl_str = f"{ttl} min" if ttl > 0 else "disabled (0)"
+        kingdom = s.get("kingdom_id")
+        kingdom_str = str(kingdom) if kingdom else "(not set)"
         await interaction.response.send_message(
-            f"Admin: <@{s['admin_user_id']}>\nMax Troop Size: {s['max_troop_size']}\nInfantry Amount: {s['infantry_amount']}\nMax Archers Amount: {s['max_archers_amount']}\nMessage TTL: {ttl_str}\nCalc Message: {calc_msg_status}",
+            f"Admin: <@{s['admin_user_id']}>\nMax Troop Size: {s['max_troop_size']}\nInfantry Amount: {s['infantry_amount']}\nMax Archers Amount: {s['max_archers_amount']}\nMessage TTL: {ttl_str}\nKingdom: {kingdom_str}\nCalc Message: {calc_msg_status}",
             ephemeral=True,
         )
 
@@ -541,6 +570,11 @@ class AdminGroup(app_commands.Group):
         except Exception as e:
             await interaction.response.send_message(f"Failed to fetch all-servers usage: {e}", ephemeral=True)
 
+    @app_commands.command(name="set-kingdom", description="Set the default Kingdom ID used for /kvk commands in this server")
+    async def set_kingdom(self, interaction: discord.Interaction, kingdom: app_commands.Range[int, 1, 100000]):
+        s = update_guild_settings(interaction.guild.id, {"kingdom_id": int(kingdom)})
+        await interaction.response.send_message(f"Default Kingdom set to {s.get('kingdom_id')}", ephemeral=True)
+
     @app_commands.command(name="set-admin", description="Set or change the admin user")
     async def set_admin(self, interaction: discord.Interaction, user: discord.User):
         s = update_guild_settings(interaction.guild.id, {"admin_user_id": int(user.id)})
@@ -567,6 +601,77 @@ class AdminGroup(app_commands.Group):
 
 
 bot.tree.add_command(AdminGroup())
+
+
+class KvkGroup(app_commands.Group):
+    def __init__(self):
+        super().__init__(name="kvk", description="Kingshot KVK utilities")
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return False
+        if not is_guild_allowed(interaction.guild):
+            await interaction.response.send_message("This bot is private and not enabled for this server.", ephemeral=True)
+            return False
+        return True
+
+    @app_commands.command(name="seasons", description="Show an overview of past KVK seasons for a kingdom")
+    @app_commands.describe(
+        kingdom="Optional kingdom ID; if omitted, uses the server's default",
+        limit="Number of seasons to show (default 10, max 25)",
+        hidden="If true, only you can see the response"
+    )
+    async def seasons(
+        self,
+        interaction: discord.Interaction,
+        kingdom: Optional[app_commands.Range[int,1,100000]] = None,
+        limit: Optional[app_commands.Range[int,1,25]] = 10,
+        hidden: Optional[bool] = True,
+    ):
+        gid = interaction.guild.id if interaction.guild else 0
+        s = get_guild_settings(gid) if gid else {}
+        k = int(kingdom) if kingdom is not None else int(s.get("kingdom_id") or 0)
+        if k <= 0:
+            await interaction.response.send_message(
+                "No kingdom specified and no default set. Use /admin set-kingdom or pass the kingdom parameter.",
+                ephemeral=True,
+            )
+            return
+        lim = int(limit) if limit is not None else 10
+        try:
+            await interaction.response.defer(ephemeral=bool(hidden))
+            seasons = await fetch_kvk_seasons(k)
+        except Exception as e:
+            await interaction.followup.send(f"Failed to fetch KVK seasons for kingdom {k}: {e}", ephemeral=True)
+            return
+        if not seasons:
+            await interaction.followup.send(f"No KVK seasons found for kingdom {k}.", ephemeral=True)
+            return
+        items = seasons[:lim]
+        # Build embed
+        title = f"KVK Seasons for Kingdom {k}"
+        embed = discord.Embed(title=title, color=discord.Color.orange())
+        for idx, it in enumerate(items, start=1):
+            # Try to grab common fields; fall back gracefully
+            name = str(it.get("name") or it.get("season") or it.get("kvkId") or f"Season {idx}")
+            start = it.get("start") or it.get("startDate") or it.get("start_time") or "?"
+            end = it.get("end") or it.get("endDate") or it.get("end_time") or "?"
+            kvk_type = it.get("type") or it.get("kvkType") or it.get("format")
+            result = it.get("result") or it.get("winner") or it.get("outcome")
+            value_lines = []
+            if kvk_type:
+                value_lines.append(f"Type: {kvk_type}")
+            value_lines.append(f"Start: {start}")
+            if end:
+                value_lines.append(f"End: {end}")
+            if result:
+                value_lines.append(f"Result: {result}")
+            embed.add_field(name=f"{idx}. {name}", value="\n".join(value_lines)[:1024], inline=False)
+        await interaction.followup.send(embed=embed, ephemeral=bool(hidden))
+
+
+bot.tree.add_command(KvkGroup())
 
 
 @bot.event
