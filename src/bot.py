@@ -1412,53 +1412,14 @@ async def _async_main(token: str) -> None:
     except Exception as e:
         logger.debug(f"Signal handler setup failed or unsupported: {e}")
 
-    # Start bot with capped exponential backoff for login attempts (no infinite retry wrapper)
-    initial_delay = 15.0
-    max_delay = 300.0  # 5 minutes cap
-    max_attempts = 6
-    delay = initial_delay
-    attempt = 0
-    while True:
-        attempt += 1
-        try:
-            logger.info("Starting Discord bot (attempt %d/%d)...", attempt, max_attempts)
-            await bot.start(token, reconnect=True)
-            # bot.start only returns after bot.close() is called during shutdown
-            break
-        except discord.errors.LoginFailure as e:
-            logger.error("Login failed (invalid token or auth issue): %s", e)
-            raise
-        except discord.errors.HTTPException as e:
-            status = getattr(e, 'status', None)
-            code = getattr(e, 'code', None)
-            if status == 429 or code == 40062:
-                jitter = random.uniform(0, min(10.0, delay))
-                sleep_for = min(max_delay, delay) + jitter
-                logger.warning(
-                    "Login rate limited (status=%s, code=%s). Retrying in %.1f seconds...",
-                    status, code, sleep_for,
-                )
-            else:
-                jitter = random.uniform(0, min(5.0, delay))
-                sleep_for = min(max_delay, max(initial_delay, delay)) + jitter
-                logger.warning(
-                    "HTTP error during bot start (status=%s, code=%s): %s. Retrying in %.1f seconds...",
-                    status, code, e, sleep_for,
-                )
-            if attempt >= max_attempts:
-                logger.error("Max login attempts (%d) reached. Exiting.", max_attempts)
-                raise SystemExit(2)
-            await asyncio.sleep(sleep_for)
-            delay = min(max_delay, delay * 2.0)
-        except Exception as e:
-            jitter = random.uniform(0, min(5.0, delay))
-            sleep_for = min(max_delay, max(initial_delay, delay)) + jitter
-            logger.error("Unexpected error during bot start: %s. Retrying in %.1f seconds...", e, sleep_for)
-            if attempt >= max_attempts:
-                logger.error("Max login attempts (%d) reached due to unexpected errors. Exiting.", max_attempts)
-                raise
-            await asyncio.sleep(sleep_for)
-            delay = min(max_delay, delay * 2.0)
+    # Start bot once and let discord.py manage reconnects. If login fails, exit and let the orchestrator restart.
+    try:
+        logger.info("Starting Discord bot...")
+        await bot.start(token, reconnect=True)
+    finally:
+        # Ensure the client session is closed on any failure to avoid leaks
+        with contextlib.suppress(Exception):
+            await bot.close()
 
 
 def main():
