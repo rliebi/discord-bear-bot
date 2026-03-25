@@ -7,7 +7,14 @@ from discord import app_commands
 from discord.ext import commands
 from typing import Optional
 
-from src.storage import get_guild_settings, update_guild_settings, set_admin_if_unset
+from src.storage import (
+    get_guild_settings,
+    update_guild_settings,
+    set_admin_if_unset,
+    record_usage_event,
+    get_usage_summary,
+    get_user_usage,
+)
 from src.calculator import GuildConfig, compute_kingshot
 
 # Allowed guilds allowlist (optional). If set, the bot only works in these guild IDs and will leave others.
@@ -199,6 +206,24 @@ async def calc(
     # Send response first (without delete_after to ensure reliability on interactions)
     await interaction.response.send_message(embed=embed, ephemeral=bool(hidden))
 
+    # Record usage for admin analytics (best-effort; do not fail command if storage errors)
+    try:
+        record_usage_event(
+            guild_id=int(guild.id),
+            user_id=int(interaction.user.id),
+            user_display=str(interaction.user),
+            total_archers=int(archer_total),
+            march_count=int(march_count),
+            calling=bool(calling),
+            joining_archers=int(result.joining_archers),
+            calling_archers=int(result.calling_archers),
+            server_id=int(guild.id),
+            server_name=str(guild.name),
+            server_max_troop_size=int(g.max_troop_size),
+        )
+    except Exception as e:
+        logger.debug(f"record_usage_event failed: {e}")
+
     # Auto-delete after configured TTL (minutes) for non-ephemeral messages; 0 means do not delete
     if (not bool(hidden)) and (ttl_seconds is not None):
         message_id: Optional[int] = None
@@ -308,6 +333,50 @@ class AdminGroup(app_commands.Group):
             f"Admin: <@{s['admin_user_id']}>\nMax Troop Size: {s['max_troop_size']}\nInfantry Amount: {s['infantry_amount']}\nMax Archers Amount: {s['max_archers_amount']}\nMessage TTL: {ttl_str}\nCalc Message: {calc_msg_status}",
             ephemeral=True,
         )
+
+    @app_commands.command(name="usage", description="Show usage stats. Omit user to see top users.")
+    @app_commands.describe(user="Optional: show details for a specific user", limit="Number of top users to list (default 20)")
+    async def usage(self, interaction: discord.Interaction, user: Optional[discord.User] = None, limit: Optional[app_commands.Range[int,1,100]] = 20):
+        try:
+            if user is not None:
+                u = get_user_usage(interaction.guild.id, int(user.id))
+                if not u:
+                    await interaction.response.send_message(f"No usage recorded for <@{user.id}>.", ephemeral=True)
+                    return
+                last_ts = u.get("last_use_ts", "?")
+                msg = (
+                    f"User: <@{user.id}> ({u.get('user_display','')})\n"
+                    f"Uses: {u.get('count',0)}\n"
+                    f"Last Use (UTC): {last_ts}\n"
+                    f"Last Input: archers={u.get('last_total_archers','?')}, marches={u.get('last_march_count','?')}, calling={u.get('last_calling', False)}\n"
+                    f"Last Output: joining_archers={u.get('last_joining_archers','?')}, calling_archers={u.get('last_calling_archers','?')}\n"
+                    f"Server: {u.get('last_server_name','?')} ({u.get('last_server_id','?')}) | Max Troop Size: {u.get('last_server_max_troop_size','?')}"
+                )
+                await interaction.response.send_message(msg, ephemeral=True)
+                return
+
+            # Summary view
+            lim = int(limit) if limit is not None else 20
+            items = get_usage_summary(interaction.guild.id, lim)
+            if not items:
+                await interaction.response.send_message("No usage recorded yet.", ephemeral=True)
+                return
+            lines = []
+            for idx, (uid, info) in enumerate(items, start=1):
+                disp = info.get("user_display") or f"<@{uid}>"
+                count = int(info.get("count", 0))
+                last_ts = info.get("last_use_ts", "?")
+                # Show last archers or joining archers as a quick reference
+                last_arch = info.get("last_total_archers", "?")
+                last_join = info.get("last_joining_archers", "?")
+                lines.append(f"{idx}. <@{uid}> ({disp}): {count} uses | last UTC: {last_ts} | TA: {last_arch} | joinA: {last_join}")
+            # Discord message length limit safeguards
+            out = "\n".join(lines)
+            if len(out) > 1800:
+                out = out[:1797] + "..."
+            await interaction.response.send_message(out, ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"Failed to fetch usage: {e}", ephemeral=True)
 
     @app_commands.command(name="set-admin", description="Set or change the admin user")
     async def set_admin(self, interaction: discord.Interaction, user: discord.User):
