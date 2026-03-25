@@ -53,6 +53,8 @@ def get_guild_settings(guild_id: int) -> Dict[str, Any]:
         g.setdefault("bear_event_last_start", "")  # UTC date string YYYY-MM-DD for daily cooldown
         # Usage stats container per guild
         g.setdefault("usage", {})  # { user_id: {count, last_use_ts, ...} }
+        # Eternal Bear leaderboard: { user_id: total_points }
+        g.setdefault("bear_lb", {})
         data[gid] = g
         _write_all(data)
         return g
@@ -85,6 +87,7 @@ def set_admin_if_unset(guild_id: int, user_id: int) -> Optional[int]:
             g.setdefault("kingdom_id", None)
             g.setdefault("bear_event_last_start", "")
             g.setdefault("usage", {})
+            g.setdefault("bear_lb", {})
             data[gid] = g
             _write_all(data)
             return int(user_id)
@@ -219,3 +222,47 @@ def get_global_top_users(limit: int = 20) -> List[Tuple[Tuple[int, int], Dict[st
         if limit > 0:
             items = items[:limit]
         return items
+
+# --- Bear eternal leaderboard helpers ---
+
+def add_bear_points(guild_id: int, user_id: int, points: int) -> None:
+    """Add points to the eternal Bear leaderboard for a single user."""
+    gid = str(guild_id)
+    uid = str(user_id)
+    with _lock:
+        data = _read_all()
+        g = data.get(gid) or {}
+        lb = g.get("bear_lb") or {}
+        lb[uid] = int(lb.get(uid, 0)) + int(points)
+        g["bear_lb"] = lb
+        data[gid] = g
+        _write_all(data)
+
+
+def add_many_bear_points(guild_id: int, points_map: Dict[int, int]) -> None:
+    """Batch add points for multiple users: points_map={user_id: points}."""
+    if not points_map:
+        return
+    gid = str(guild_id)
+    with _lock:
+        data = _read_all()
+        g = data.get(gid) or {}
+        lb = g.get("bear_lb") or {}
+        for uid_int, pts in points_map.items():
+            uid = str(uid_int)
+            lb[uid] = int(lb.get(uid, 0)) + int(pts)
+        g["bear_lb"] = lb
+        data[gid] = g
+        _write_all(data)
+
+
+def get_bear_top(guild_id: int, limit: int = 10) -> List[Tuple[int, int]]:
+    """Return top users from the eternal leaderboard as list of (user_id, points)."""
+    gid = str(guild_id)
+    with _lock:
+        data = _read_all()
+        g = data.get(gid) or {}
+        lb = g.get("bear_lb") or {}
+        items = [(int(uid), int(pts)) for uid, pts in lb.items()]
+        items.sort(key=lambda kv: kv[1], reverse=True)
+        return items[: max(1, int(limit))]

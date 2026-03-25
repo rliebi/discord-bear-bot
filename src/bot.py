@@ -19,6 +19,8 @@ from src.storage import (
     get_usage_summary,
     get_user_usage,
     get_all_guilds_usage,
+    add_many_bear_points,
+    get_bear_top,
 )
 from src.calculator import GuildConfig, compute_kingshot
 
@@ -805,6 +807,77 @@ async def _announce(channel: Optional[discord.abc.Messageable], content: Optiona
     with contextlib.suppress(Exception):
         await channel.send(content=content, embed=embed)
 
+async def _finalize_rally_and_announce(gid: int, ev: "_BearEventState", rally_id: int, default_channel: Optional[discord.abc.Messageable] = None) -> None:
+    """Finalize a rally, assign points, update persistent leaderboard, and announce a per-rally leaderboard."""
+    # Collect data under lock and assign random points
+    points_map: dict[int, int] = {}
+    caller_id: Optional[int] = None
+    title: str = f"Rally #{rally_id}"
+    parts_list: list[int] = []
+    start_dt: Optional[datetime] = None
+    end_dt: Optional[datetime] = None
+    async with ev.lock:
+        r = ev.rallies.get(int(rally_id))
+        if not r or r.get("done"):
+            return
+        r["done"] = True
+        caller_id = r.get("caller_id")
+        title = r.get("title") or title
+        start_dt = r.get("start")
+        end_dt = r.get("end")
+        participants = set(r.get("participants") or [])
+        parts_list = list(participants)
+        for pid in participants:
+            pts = random.randint(8, 15) if pid == caller_id else random.randint(5, 12)
+            points_map[int(pid)] = pts
+            ev.user_points[int(pid)] = int(ev.user_points.get(int(pid), 0)) + int(pts)
+            cur = int(ev.user_joins.get(int(pid), 0))
+            if cur > 0:
+                ev.user_joins[int(pid)] = cur - 1
+    # Update eternal leaderboard (best-effort)
+    with contextlib.suppress(Exception):
+        if points_map:
+            add_many_bear_points(int(gid), points_map)
+    # Build announcement embed with per-rally leaderboard
+    ch = bot.get_channel(ev.channel_id) if ev and ev.channel_id else default_channel
+    # Sort by points desc
+    sorted_pts = sorted(points_map.items(), key=lambda kv: kv[1], reverse=True)
+    medals = ["🥇", "🥈", "🥉"]
+    lines = []
+    for idx, (uid, pts) in enumerate(sorted_pts, start=1):
+        prefix = medals[idx-1] if idx <= 3 else f"{idx}."
+        lines.append(f"{prefix} <@{uid}> — {pts} pts")
+    # Include small summary
+    color = discord.Color.green()
+    embed = discord.Embed(title=f"🏁 Rally Landed (ID {rally_id})", color=color)
+    embed.add_field(name="Title", value=str(title), inline=False)
+    if caller_id:
+        embed.add_field(name="Caller", value=f"<@{caller_id}>", inline=True)
+    participants_count = len(parts_list)
+    embed.add_field(name="Participants", value=str(participants_count), inline=True)
+    # Duration info
+    try:
+        if start_dt and end_dt:
+            dur = int((end_dt - start_dt).total_seconds())
+            embed.add_field(name="Rally Duration", value=_fmt_duration(dur), inline=True)
+    except Exception:
+        pass
+    if lines:
+        # Discord field value limit guard
+        value = "\n".join(lines)
+        if len(value) > 1024:
+            value = value[:1021] + "..."
+        embed.add_field(name="Rally Leaderboard", value=value, inline=False)
+    # Also show current top 5 of this event as context
+    try:
+        tops_event = sorted(ev.user_points.items(), key=lambda kv: kv[1], reverse=True)[:5]
+        if tops_event:
+            ev_lines = [f"{i+1}. <@{uid}> — {pts} pts" for i, (uid, pts) in enumerate(tops_event)]
+            embed.add_field(name="Event Top 5 (so far)", value="\n".join(ev_lines)[:1024], inline=False)
+    except Exception:
+        pass
+    await _announce(ch, embed=embed)
+
 class LaunchRallyView(discord.ui.View):
     def __init__(self, guild_id: int, timeout: Optional[float] = None):
         # timeout in seconds; default to event remaining time
@@ -825,8 +898,16 @@ class LaunchRallyView(discord.ui.View):
         uid = int(interaction.user.id)
         async with ev.lock:
             if int(ev.user_joins.get(uid, 0)) >= 6:
-                await interaction.response.send_message("You reached the 6 rally participation limit for this event.", ephemeral=True)
+                await interaction.response.send_message("You have reached the limit of 6 concurrent rallies. Wait for one to finish, then try again.", ephemeral=True)
                 return
+            # Enforce one rally hosted per user per event
+            for r_existing in ev.rallies.values():
+                try:
+                    if int(r_existing.get("caller_id")) == uid:
+                        await interaction.response.send_message("You can only host one rally per event.", ephemeral=True)
+                        return
+                except Exception:
+                    pass
             rid = ev.next_rally_id
             ev.next_rally_id += 1
             now = datetime.now(timezone.utc)
@@ -868,22 +949,7 @@ class LaunchRallyView(discord.ui.View):
                 ev2 = _BEAR_EVENTS.get(int(gid))
                 if ev2 is None:
                     return
-                async with ev2.lock:
-                    r2 = ev2.rallies.get(int(rally_id))
-                    if not r2 or r2.get("done"):
-                        return
-                    r2["done"] = True
-                    participants = set(r2.get("participants") or [])
-                    for pid in participants:
-                        pts = random.randint(8, 15) if pid == r2.get("caller_id") else random.randint(5, 12)
-                        ev2.user_points[pid] = int(ev2.user_points.get(pid, 0)) + int(pts)
-                ch = bot.get_channel(ev2.channel_id) if ev2 and ev2.channel_id else interaction.channel
-                names = [f"<@{pid}>" for pid in list(participants)[:20]]
-                extra = "" if len(participants) <= 20 else f" and {len(participants)-20} more"
-                res = discord.Embed(title=f"✅ Rally Resolved (ID {rally_id})", color=discord.Color.green())
-                res.description = f"Participants ({len(participants)}): " + (", ".join(names) + extra if names else "None")
-                res.add_field(name="Scoring", value="Caller: 8–15 pts | Joiners: 5–12 pts (random)", inline=False)
-                await _announce(ch, embed=res)
+                await _finalize_rally_and_announce(int(gid), ev2, int(rally_id), interaction.channel)
             except Exception as e:
                 logger.debug(f"_finish_rally (button) error: {e}")
         try:
@@ -905,42 +971,43 @@ class JoinRallyView(discord.ui.View):
     @discord.ui.button(label="Join", style=discord.ButtonStyle.success, emoji="➕")
     async def join_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
+        # Immediately acknowledge to avoid interaction timeout causing "This interaction failed"
+        try:
+            await interaction.response.defer(ephemeral=True)
+        except Exception:
+            # If already responded for any reason, continue with followup
+            pass
         if guild is None or int(guild.id) != self.guild_id:
-            await interaction.response.send_message("This button is not valid here.", ephemeral=True)
+            await interaction.followup.send("This button is not valid here.", ephemeral=True)
             return
         ev = _BEAR_EVENTS.get(int(guild.id))
         if ev is None or ev.time_left_seconds() <= 0:
-            await interaction.response.send_message("No active Bear event.", ephemeral=True)
+            await interaction.followup.send("No active Bear event.", ephemeral=True)
             return
         uid = int(interaction.user.id)
+        # Decide message under lock
+        msg_text = None
         async with ev.lock:
             if int(ev.user_joins.get(uid, 0)) >= 6:
-                await interaction.response.send_message("You have reached the 6 rally participation limit for this event.", ephemeral=True)
-                return
-            r = ev.rallies.get(int(self.rally_id))
-            if not r:
-                await interaction.response.send_message(f"Rally {int(self.rally_id)} not found.", ephemeral=True)
-                return
-            if r.get("done"):
-                await interaction.response.send_message(f"Rally {int(self.rally_id)} has already finished.", ephemeral=True)
-                return
-            if datetime.now(timezone.utc) >= r.get("end"):
-                await interaction.response.send_message(f"Rally {int(self.rally_id)} is no longer rallying.", ephemeral=True)
-                return
-            parts = r.get("participants")
-            if uid in parts:
-                await interaction.response.send_message("You are already in this rally.", ephemeral=True)
-                return
-            parts.add(uid)
-            ev.user_joins[uid] = int(ev.user_joins.get(uid, 0)) + 1
-            left = max(0, 6 - int(ev.user_joins.get(uid, 0)))
-        # Update the rally message with new participant count if we can fetch it
-        try:
-            msg = await interaction.original_response()
-            # If this button interaction is tied to the message, editing the message's embed is optional. We'll just ack.
-        except Exception:
-            pass
-        await interaction.response.send_message(f"Joined rally {int(self.rally_id)}! You can still join {left} more rally(ies) this event.", ephemeral=True)
+                msg_text = "You have reached the limit of 6 concurrent rallies. Wait for one to finish, then try again."
+            else:
+                r = ev.rallies.get(int(self.rally_id))
+                if not r:
+                    msg_text = f"Rally {int(self.rally_id)} not found."
+                elif r.get("done"):
+                    msg_text = f"Rally {int(self.rally_id)} has already finished."
+                elif datetime.now(timezone.utc) >= r.get("end"):
+                    msg_text = f"Rally {int(self.rally_id)} is no longer rallying."
+                else:
+                    parts = r.get("participants")
+                    if uid in parts:
+                        msg_text = "You are already in this rally."
+                    else:
+                        parts.add(uid)
+                        ev.user_joins[uid] = int(ev.user_joins.get(uid, 0)) + 1
+                        left = max(0, 6 - int(ev.user_joins.get(uid, 0)))
+                        msg_text = f"Joined rally {int(self.rally_id)}! You can still join {left} more rally(ies) at once."
+        await interaction.followup.send(msg_text, ephemeral=True)
 
 
 class BearGroup(app_commands.Group):
@@ -985,7 +1052,7 @@ class BearGroup(app_commands.Group):
         embed = discord.Embed(title="🐻 Bear Event Started!", color=discord.Color.gold())
         embed.description = (
             "For the next 30 minutes, launch rallies (5 min) to attack the fictional bear!\n"
-            "Join rallies to earn points. You can participate in up to 6 rallies total.\n"
+            "Join rallies to earn points. You can participate in up to 6 rallies at once; when one finishes, you can join another.\n"
             "Use the button below to launch a rally, or use /bear launch."
         )
         embed.add_field(name="Ends In", value=_fmt_duration(int((end_ts - start_ts).total_seconds())), inline=True)
@@ -1057,7 +1124,71 @@ class BearGroup(app_commands.Group):
             await _announce(ch, embed=embed)
         await interaction.response.send_message("Event reset complete.", ephemeral=True)
 
-    @app_commands.command(name="launch", description="Launch a 5-minute rally to the bear (counts toward your 6 joins)")
+    @app_commands.command(name="abort", description="Admin: abort an active rally by ID (no points awarded)")
+    async def abort(self, interaction: discord.Interaction, rally_id: app_commands.Range[int,1,1000000]):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        if not is_admin_check(interaction):
+            await interaction.response.send_message("Only the configured admin can abort a rally.", ephemeral=True)
+            return
+        ev = _BEAR_EVENTS.get(int(guild.id))
+        if ev is None or ev.time_left_seconds() <= 0:
+            await interaction.response.send_message("No active Bear event.", ephemeral=True)
+            return
+        # Find and mark rally as done, cancel its task
+        ch_id = None
+        msg_id = None
+        caller_id = None
+        parts_count = 0
+        async with ev.lock:
+            r = ev.rallies.get(int(rally_id))
+            if not r:
+                await interaction.response.send_message(f"Rally {int(rally_id)} not found.", ephemeral=True)
+                return
+            if r.get("done"):
+                await interaction.response.send_message(f"Rally {int(rally_id)} has already finished.", ephemeral=True)
+                return
+            r["done"] = True
+            t = r.get("task")
+            if t:
+                with contextlib.suppress(Exception):
+                    t.cancel()
+            ch_id = r.get("channel_id")
+            msg_id = r.get("message_id")
+            caller_id = r.get("caller_id")
+            parts = r.get("participants") or set()
+            # Decrement active rally counts for all participants since this rally is aborted
+            for pid in list(parts):
+                try:
+                    cur = int(ev.user_joins.get(pid, 0))
+                    if cur > 0:
+                        ev.user_joins[pid] = cur - 1
+                except Exception:
+                    pass
+            parts_count = len(parts)
+        # Try to remove the Join button from the original message if available
+        if ch_id and msg_id:
+            try:
+                chan = interaction.client.get_channel(int(ch_id))
+                if chan and hasattr(chan, "fetch_message"):
+                    m = await chan.fetch_message(int(msg_id))  # type: ignore[assignment]
+                    with contextlib.suppress(Exception):
+                        await m.edit(view=None)
+            except Exception as e:
+                logger.debug(f"Failed to edit rally message on abort: {e}")
+        # Announce the abort
+        ch = bot.get_channel(ev.channel_id) if ev and ev.channel_id else interaction.channel
+        embed = discord.Embed(title=f"🛑 Rally Aborted (ID {int(rally_id)})", color=discord.Color.red())
+        if caller_id:
+            embed.add_field(name="Caller", value=f"<@{caller_id}>", inline=True)
+        embed.add_field(name="Participants", value=str(parts_count), inline=True)
+        embed.set_footer(text="No points were awarded.")
+        await _announce(ch, embed=embed)
+        await interaction.response.send_message(f"Rally {int(rally_id)} aborted.", ephemeral=True)
+
+    @app_commands.command(name="launch", description="Launch a 5-minute rally to the bear (counts toward your 6 concurrent joins)")
     @app_commands.describe(title="Optional short title for your rally")
     async def launch(self, interaction: discord.Interaction, title: Optional[str] = None):
         guild = interaction.guild
@@ -1071,8 +1202,16 @@ class BearGroup(app_commands.Group):
         uid = int(interaction.user.id)
         async with ev.lock:
             if int(ev.user_joins.get(uid, 0)) >= 6:
-                await interaction.response.send_message("You have reached the 6 rally participation limit for this event.", ephemeral=True)
+                await interaction.response.send_message("You have reached the limit of 6 concurrent rallies. Wait for one to finish, then try again.", ephemeral=True)
                 return
+            # Enforce one rally hosted per user per event
+            for r_existing in ev.rallies.values():
+                try:
+                    if int(r_existing.get("caller_id")) == uid:
+                        await interaction.response.send_message("You can only host one rally per event.", ephemeral=True)
+                        return
+                except Exception:
+                    pass
             rid = ev.next_rally_id
             ev.next_rally_id += 1
             now = datetime.now(timezone.utc)
@@ -1111,29 +1250,7 @@ class BearGroup(app_commands.Group):
                 ev2 = _BEAR_EVENTS.get(int(gid))
                 if ev2 is None:
                     return
-                async with ev2.lock:
-                    r2 = ev2.rallies.get(int(rally_id))
-                    if not r2 or r2.get("done"):
-                        return
-                    r2["done"] = True
-                    participants: Set[int] = set(r2.get("participants") or [])
-                    # Award random points
-                    for pid in participants:
-                        if pid == r2.get("caller_id"):
-                            pts = random.randint(8, 15)
-                        else:
-                            pts = random.randint(5, 12)
-                        ev2.user_points[pid] = int(ev2.user_points.get(pid, 0)) + int(pts)
-                # Announce result
-                ch = bot.get_channel(ev2.channel_id) if ev2 and ev2.channel_id else interaction.channel
-                names = []
-                for pid in list(participants)[:20]:
-                    names.append(f"<@{pid}>")
-                extra = "" if len(participants) <= 20 else f" and {len(participants)-20} more"
-                res = discord.Embed(title=f"✅ Rally Resolved (ID {rally_id})", color=discord.Color.green())
-                res.description = f"Participants ({len(participants)}): " + (", ".join(names) + extra if names else "None")
-                res.add_field(name="Scoring", value="Caller: 8–15 pts | Joiners: 5–12 pts (random)", inline=False)
-                await _announce(ch, embed=res)
+                await _finalize_rally_and_announce(int(gid), ev2, int(rally_id), interaction.channel)
             except Exception as e:
                 logger.debug(f"_finish_rally error: {e}")
         try:
@@ -1145,7 +1262,7 @@ class BearGroup(app_commands.Group):
         except RuntimeError:
             pass
 
-    @app_commands.command(name="join", description="Join an active rally by ID (max 6 rallies per event)")
+    @app_commands.command(name="join", description="Join an active rally by ID (max 6 concurrent rallies)")
     async def join(self, interaction: discord.Interaction, rally_id: app_commands.Range[int,1,1000000]):
         guild = interaction.guild
         if guild is None:
@@ -1158,7 +1275,7 @@ class BearGroup(app_commands.Group):
         uid = int(interaction.user.id)
         async with ev.lock:
             if int(ev.user_joins.get(uid, 0)) >= 6:
-                await interaction.response.send_message("You have reached the 6 rally participation limit for this event.", ephemeral=True)
+                await interaction.response.send_message("You have reached the limit of 6 concurrent rallies. Wait for one to finish, then try again.", ephemeral=True)
                 return
             r = ev.rallies.get(int(rally_id))
             if not r:
@@ -1207,7 +1324,7 @@ class BearGroup(app_commands.Group):
         uid = int(interaction.user.id)
         pts = int(ev.user_points.get(uid, 0))
         joins = int(ev.user_joins.get(uid, 0))
-        embed.add_field(name="You", value=f"Points: {pts}\nRallies joined: {joins}/6", inline=True)
+        embed.add_field(name="You", value=f"Points: {pts}\nActive rallies: {joins}/6", inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=bool(hidden))
 
     @app_commands.command(name="leaderboard", description="Show the current event leaderboard")
@@ -1229,6 +1346,27 @@ class BearGroup(app_commands.Group):
         else:
             lines = [f"{idx+1}. <@{uid}> — {pts} pts" for idx, (uid, pts) in enumerate(tops)]
             embed.add_field(name=f"Top {len(tops)}", value="\n".join(lines)[:1024], inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=bool(hidden))
+
+    @app_commands.command(name="top", description="Show the all-time Bear leaderboard (eternal)")
+    @app_commands.describe(limit="How many top players to show (default 10)", hidden="If true, only you can see the response")
+    async def top(self, interaction: discord.Interaction, limit: Optional[app_commands.Range[int,1,50]] = 10, hidden: Optional[bool] = True):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+            return
+        lim = int(limit) if limit is not None else 10
+        try:
+            items = get_bear_top(int(guild.id), lim)
+        except Exception as e:
+            await interaction.response.send_message(f"Failed to fetch eternal leaderboard: {e}", ephemeral=True)
+            return
+        embed = discord.Embed(title="🏆 Bear Eternal Leaderboard", color=discord.Color.gold())
+        if not items:
+            embed.description = "No points have been recorded yet. Start an event with /bear start!"
+        else:
+            lines = [f"{idx+1}. <@{uid}> — {pts} pts" for idx, (uid, pts) in enumerate(items)]
+            embed.add_field(name=f"Top {len(items)}", value="\n".join(lines)[:1024], inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=bool(hidden))
 
 
