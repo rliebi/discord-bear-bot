@@ -187,7 +187,8 @@ async def fetch_kvk_seasons(kingdom_id: int, limit: Optional[int] = None) -> Lis
     archer_total="Your total number of archers",
     march_count="How many joining marches (excluding caller march)",
     calling="Are you the rally caller?",
-    max_march_size="Optional: override for threshold (uses 90% of this instead of 120k)",
+    override_march_archers="Optional: force joining archers to this amount (e.g. 50000)",
+    total_march_size="Optional: your total march capacity (e.g. 250000). Also overrides threshold calculation.",
     hidden="Optional: if true, the response is visible only to you"
 )
 async def calc(
@@ -195,7 +196,8 @@ async def calc(
     archer_total: app_commands.Range[int, 0, 100000000],
     march_count: app_commands.Range[int, 1, 50],
     calling: bool,
-    max_march_size: Optional[app_commands.Range[int, 1000, 2000000]] = None,
+    override_march_archers: Optional[app_commands.Range[int, 0, 2000000]] = None,
+    total_march_size: Optional[app_commands.Range[int, 1000, 2000000]] = None,
     hidden: Optional[bool] = False,
 ):
     guild = interaction.guild
@@ -226,10 +228,10 @@ async def calc(
         return
 
     # Ratio mode: if TA > (MC * MAA) + extra
-    # extra is 120k by default, or floor(0.9 * max_march_size) if provided by user
+    # extra is 120k by default, or floor(0.9 * total_march_size) if provided by user
     extra = 120000
-    if max_march_size is not None:
-        extra = int(0.9 * int(max_march_size))
+    if total_march_size is not None:
+        extra = int(0.9 * int(total_march_size))
     threshold = (int(march_count) * int(g.max_archers_amount)) + extra
     ratio_mode = int(archer_total) > threshold
 
@@ -245,13 +247,22 @@ async def calc(
         f"March Count: {march_count}",
         f"Rally Caller: {'Yes' if calling else 'No'}",
     ]
-    if max_march_size is not None:
-        user_input_lines.append(f"Max March Size (override): {int(max_march_size)}")
+    if override_march_archers is not None:
+        user_input_lines.append(f"Override March Archers: {int(override_march_archers)}")
+    if total_march_size is not None:
+        user_input_lines.append(f"Total March Size: {int(total_march_size)}")
     embed.add_field(name="Your Input", value="\n".join(user_input_lines), inline=False)
 
     # Always compute normal results for accurate joining values (and calling when not in ratio mode)
     try:
-        result = compute_kingshot(g, int(archer_total), int(march_count), bool(calling))
+        result = compute_kingshot(
+            g,
+            int(archer_total),
+            int(march_count),
+            bool(calling),
+            override_march_archers=int(override_march_archers) if override_march_archers is not None else None,
+            total_march_size=int(total_march_size) if total_march_size is not None else None,
+        )
     except Exception as e:
         await interaction.response.send_message(f"Error: {e}", ephemeral=True)
         return
