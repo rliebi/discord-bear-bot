@@ -267,11 +267,12 @@ async def calc(
         await interaction.response.send_message(f"Error: {e}", ephemeral=True)
         return
 
-    # Joining march is always numeric (with 1000-floor and MAA cap per calculator)
+    # Joining march is numeric if total_march_size provided, else show "Rest" for cavalry
+    joining_cav_display = str(result.joining_cavalry) if total_march_size is not None else "Rest"
     embed.add_field(name="Joining March (per march)", value=(
         f"Archers: {result.joining_archers}\n"
         f"Infantry: {result.joining_infantry}\n"
-        f"Cavalry: {result.joining_cavalry}"
+        f"Cavalry: {joining_cav_display}"
     ), inline=True)
 
     # Calling march: if ratio-mode AND user is caller → show 1/9/90. Otherwise show numeric result or N/A.
@@ -284,10 +285,11 @@ async def calc(
                 "Cavalry: Rest (≈9%)"
             ), inline=True)
         else:
+            calling_cav_display = str(result.calling_cavalry) if total_march_size is not None else "Rest"
             embed.add_field(name="Calling March", value=(
                 f"Archers: {result.calling_archers}\n"
                 f"Infantry: {result.calling_infantry}\n"
-                f"Cavalry: Rest"
+                f"Cavalry: {calling_cav_display}"
             ), inline=True)
     else:
         embed.add_field(name="Calling March", value="N/A (not a caller)", inline=True)
