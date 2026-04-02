@@ -39,17 +39,23 @@ Example setup:
 ## Users: Calculate Marches
 Use the slash command:
 ```
-/calc archer_total:<int> march_count:<int> calling:<true|false> [max_march_size:<int>] [hidden:<true|false>]
+/calc archer_total:<int> march_count:<int> [is_calling:<true|false>] [override_march_archers:<int>] [total_march_size:<int>] [hidden:<true|false>]
 ```
 - archer_total: Your total number of archers
-- march_count: How many joining marches you plan to send
-- calling: true if you will call a rally, false otherwise
-- max_march_size (optional): Overrides the extra buffer used for ratio-mode; extra becomes floor(0.9 × max_march_size) instead of the default 120,000.
+- march_count: How many joining marches you are sending/participating in
+- is_calling (optional): Whether you are also calling a rally (Default: true)
+- override_march_archers (optional): Force joining archers to this specific amount
+- total_march_size (optional): Your personal physical march capacity. Used to calculate exactly how much cavalry to send.
 - hidden (optional): If true, the response is visible only to you (ephemeral). Defaults to public.
 
 ### What you get back
-- Joining March table: Archers, Infantry, Cavalry for each joining march
-- Calling March table: shown only if calling=true. Provides an Archer/Inf/Cav composition for your caller march
+The bot provides calculations based on the roles you specified:
+- Your Joining March: Shown if `march_count > 0`.
+  - Archers are capped by the server's MAA setting and rounded down to the nearest 1000 for easier coordination.
+  - Cavalry calculation respects both your `total_march_size` (if provided) and the server's `Max Troop Size` limit.
+- Your Calling March: Shown if `is_calling` is true.
+  - Archers are the exact remainder needed to reach your total archer pool, and are NOT rounded.
+  - Calculation is limited only by your `total_march_size` (the server's `Max Troop Size` limit does not apply to the caller).
 
 Note: By default, /calc results are posted publicly in the channel so your team can coordinate. Set `hidden:true` to receive the result privately. Admin commands remain ephemeral.
 
@@ -57,72 +63,56 @@ Auto-delete: Non-ephemeral /calc messages are automatically deleted after 10 min
 
 Graceful shutdown: When the bot is stopped (e.g., container/app shutdown), any pending auto-delete timers are cancelled and the bot will attempt to immediately delete all messages that were scheduled for deletion. This reduces the chance that result messages linger if the app restarts before timers fire.
 
-### Ratio Mode (automatic, caller only)
-We switch to simple ratio guidance only for the CALLING march when you have a surplus of archers:
-- Condition: `TA > (MC × MAA) + extra` AND `calling = true`
+### Ratio Mode (automatic, Calling March only)
+We switch to simple ratio guidance for the Calling March when you have a surplus of archers:
+- Condition: `TA > (MC × MAA) + extra`
   - `extra` defaults to 120,000
-  - If `max_march_size` is provided, `extra = floor(0.9 × max_march_size)` to account for 90% archers on the caller march
+  - If `total_march_size` is provided, `extra = floor(0.9 × total_march_size)`
 - Output for the Calling March:
   - Infantry: 1%
-  - Cavalry: 9%
+  - Cavalry: Rest (≈9%)
   - Archers: 90%
-- Joining Marches remain in normal mode with numeric values. Archers are capped by MAA and are rounded down to the nearest 1000 only when you are the caller; if you are not calling, they are not rounded.
+- Joining Marches remain in normal mode with numeric values.
 
-### Calculation Summary (normal mode)
-Given server settings MTS, INF, MAA and user input TA, MC, Calling:
-1) Caller archer value for joining marches
-- Divisor = MC + (1 if Calling else 0)
-- Base = floor(TA / Divisor)
-- Cap by MAA
-- If calling=true, round DOWN to nearest 1000; otherwise do not round.
-- caller_archer_value = (calling ? floor_1000(min(Base, MAA)) : min(Base, MAA))
-
-2) Joining march
-- Archers = caller_archer_value (rounded to 1000 only when calling)
-- Infantry = INF
-- Cavalry = max(0, MTS - Archers - Infantry)
-
-3) Calling march (only when calling=true)
-- Infantry = INF
-- Archers = min(TA - (caller_archer_value * MC), MTS - Infantry)  (no extra rounding)
-- Cavalry = Rest (i.e., MTS - Infantry - Archers)
-
-Rounding rule: Joining march archers are rounded down to the nearest 1000 only when you are the caller; if you are not calling, they are not rounded. The calling march values are not rounded.
-
-### Examples
-1) Ratio mode kicks in with override
-```
-/calc archer_total:900000 march_count:3 calling:true max_march_size:300000
-```
-- MAA from server assumed large; threshold = (3 × MAA) + floor(0.9 × 300000) = (3 × MAA) + 270000
-- If TA=900000 > threshold, output is 1% INF, 9% CAV, 90% ARCHERS
-
-2) Normal mode remains
-```
-/calc archer_total:400000 march_count:2 calling:false
-```
-- Uses the standard computation with joining archers rounded down to the nearest 1000.
+### Calculation Summary
+Given server settings MTS, INF, MAA and user input TA, MC, and IS_CALLING:
+1) Divisor = MC + (1 if IS_CALLING else 0)
+2) Base Archers = floor(TA / Divisor)
+3) Your Joining March (if MC > 0)
+   - Archers = min(Base Archers, MAA) rounded down to nearest 1000
+   - Infantry = INF
+   - Cavalry = max(0, min(total_march_size, MTS) - Archers - Infantry) (if total_march_size provided)
+4) Your Calling March (if IS_CALLING)
+   - Archers = min(TA - (Joining Archers * MC), total_march_size - INF)
+   - Infantry = INF
+   - Cavalry = max(0, total_march_size - Archers - Infantry) (if total_march_size provided)
 
 ### Examples
 Assume server settings: MTS=300000, INF=20000, MAA=160000
 
-1) Not a caller
+1) Only joining 2 rallies (No calling)
 ```
-/calc archer_total:400000 march_count:2 calling:false
+/calc archer_total:400000 march_count:2 is_calling:false
 ```
 - Divisor = 2
 - Base Archers = floor(400000 / 2) = 200000 → cap at 160000
-- Joining March = Archers 160000, Infantry 20000, Cavalry 120000
+- Joining March = Archers 160000, Infantry 20000, Cavalry 120000 (if MTS=300k)
 
-2) Is caller
+2) Calling 1 and joining 2 (Total 3 marches)
 ```
-/calc archer_total:400000 march_count:2 calling:true
+/calc archer_total:400000 march_count:2
 ```
-- Divisor = 3
+- Divisor = 3 (Default is_calling:true)
 - Base Archers = floor(400000 / 3) = 133333 → round to 133000 → cap ≤ 160000 → 133000
-- Joining March = Archers 133000, Infantry 20000, Cavalry 147000
-- Calling March Archers = min(400000 - (133000*2)=134000, 300000-20000=280000) = 134000
-- Calling March Cavalry = 300000 - 20000 - 134000 = 146000
+- Joining March = Archers 133000, Infantry 20000
+- Calling March Archers = 400000 - (133000*2) = 134000
+
+3) Only calling 1 rally
+```
+/calc archer_total:200000 march_count:0
+```
+- Divisor = 1
+- Calling March Archers = 200000, Infantry 20000
 
 ## Last: Show your most recent calculation
 Use the slash command:

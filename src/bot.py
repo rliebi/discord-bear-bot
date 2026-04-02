@@ -185,8 +185,8 @@ async def fetch_kvk_seasons(kingdom_id: int, limit: Optional[int] = None) -> Lis
 @bot.tree.command(name="calc", description="Calculate Kingshot Bear Troop Ratio for your marches")
 @app_commands.describe(
     archer_total="Your total number of archers",
-    march_count="How many joining marches (excluding caller march)",
-    calling="Are you the rally caller?",
+    march_count="How many joining marches",
+    is_calling="Are you calling a rally? (Default: True)",
     override_march_archers="Optional: force joining archers to this amount (e.g. 50000)",
     total_march_size="Optional: your total march capacity (e.g. 250000). Also overrides threshold calculation.",
     hidden="Optional: if true, the response is visible only to you"
@@ -194,8 +194,8 @@ async def fetch_kvk_seasons(kingdom_id: int, limit: Optional[int] = None) -> Lis
 async def calc(
     interaction: discord.Interaction,
     archer_total: app_commands.Range[int, 0, 100000000],
-    march_count: app_commands.Range[int, 1, 50],
-    calling: bool,
+    march_count: app_commands.Range[int, 0, 50],
+    is_calling: Optional[bool] = True,
     override_march_archers: Optional[app_commands.Range[int, 0, 2000000]] = None,
     total_march_size: Optional[app_commands.Range[int, 1000, 2000000]] = None,
     hidden: Optional[bool] = False,
@@ -206,6 +206,13 @@ async def calc(
         return
     if not is_guild_allowed(guild):
         await interaction.response.send_message("This bot is private and not enabled for this server.", ephemeral=True)
+        return
+
+    # Validate at least one march
+    if not is_calling and march_count <= 0:
+        await interaction.response.send_message(
+            "You must have at least one march (either be calling or have join count > 0).", ephemeral=True
+        )
         return
 
     s = get_guild_settings(guild.id)
@@ -227,8 +234,7 @@ async def calc(
         )
         return
 
-    # Ratio mode: if TA > (MC * MAA) + extra
-    # extra is 120k by default, or floor(0.9 * total_march_size) if provided by user
+    # Ratio mode threshold
     extra = 120000
     if total_march_size is not None:
         extra = int(0.9 * int(total_march_size))
@@ -242,57 +248,61 @@ async def calc(
         f"Infantry Amount: {g.infantry_amount}\n"
         f"Max Archers Amount: {g.max_archers_amount}"
     ), inline=False)
-    user_input_lines = [
-        f"Total Archers: {archer_total}",
-        f"March Count: {march_count}",
-        f"Rally Caller: {'Yes' if calling else 'No'}",
-    ]
+    
+    # User Input summary
+    user_input_lines = [f"Total Archers: {archer_total}"]
+    march_desc = []
+    if is_calling:
+        march_desc.append("1 caller")
+    if march_count > 0:
+        march_desc.append(f"{march_count} joiner{'s' if march_count > 1 else ''}")
+    user_input_lines.append(f"Marches: {' + '.join(march_desc)}")
+    
     if override_march_archers is not None:
         user_input_lines.append(f"Override March Archers: {int(override_march_archers)}")
     if total_march_size is not None:
         user_input_lines.append(f"Total March Size: {int(total_march_size)}")
     embed.add_field(name="Your Input", value="\n".join(user_input_lines), inline=False)
 
-    # Always compute normal results for accurate joining values (and calling when not in ratio mode)
+    # Compute results
     try:
         result = compute_kingshot(
             g,
             int(archer_total),
             int(march_count),
-            bool(calling),
             override_march_archers=int(override_march_archers) if override_march_archers is not None else None,
             total_march_size=int(total_march_size) if total_march_size is not None else None,
+            is_calling=bool(is_calling),
         )
     except Exception as e:
         await interaction.response.send_message(f"Error: {e}", ephemeral=True)
         return
 
-    # Joining march is numeric if total_march_size provided, else show "Rest" for cavalry
-    joining_cav_display = str(result.joining_cavalry) if total_march_size is not None else "Rest"
-    embed.add_field(name="Joining March (per march)", value=(
-        f"Archers: {result.joining_archers}\n"
-        f"Infantry: {result.joining_infantry}\n"
-        f"Cavalry: {joining_cav_display}"
-    ), inline=True)
+    # Joining march
+    if march_count > 0:
+        joining_cav_display = str(result.joining_cavalry) if total_march_size is not None else "Rest"
+        embed.add_field(name="Your Joining March", value=(
+            f"Archers: {result.joining_archers}\n"
+            f"Infantry: {result.joining_infantry}\n"
+            f"Cavalry: {joining_cav_display}"
+        ), inline=True)
 
-    # Calling march: if ratio-mode AND user is caller → show 1/9/90. Otherwise show numeric result or N/A.
-    if calling:
+    # Calling march
+    if is_calling:
         if ratio_mode:
-            embed.add_field(name="Mode", value=f"Ratio mode (caller only). Trigger: TA > MC*MAA + extra = {march_count}*{g.max_archers_amount} + {extra} = {threshold}", inline=False)
-            embed.add_field(name="Calling March", value=(
+            embed.add_field(name="Mode", value=f"Ratio mode (caller only). Threshold: {threshold}", inline=False)
+            embed.add_field(name="Your Calling March", value=(
                 "Archers: 90%\n"
                 "Infantry: 1%\n"
                 "Cavalry: Rest (≈9%)"
             ), inline=True)
         else:
             calling_cav_display = str(result.calling_cavalry) if total_march_size is not None else "Rest"
-            embed.add_field(name="Calling March", value=(
+            embed.add_field(name="Your Calling March", value=(
                 f"Archers: {result.calling_archers}\n"
                 f"Infantry: {result.calling_infantry}\n"
                 f"Cavalry: {calling_cav_display}"
             ), inline=True)
-    else:
-        embed.add_field(name="Calling March", value="N/A (not a caller)", inline=True)
 
     # Optional server message
     if calc_message:
@@ -316,7 +326,6 @@ async def calc(
             user_display=str(interaction.user),
             total_archers=int(archer_total),
             march_count=int(march_count),
-            calling=bool(calling),
             joining_archers=int(result.joining_archers),
             calling_archers=int(result.calling_archers),
             server_id=int(guild.id),
