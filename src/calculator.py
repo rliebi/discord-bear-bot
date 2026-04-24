@@ -26,44 +26,50 @@ def compute_kingshot(
     override_march_archers: Optional[int] = None,
     total_march_size: Optional[int] = None,
     is_calling: bool = True,
+    override_max_troop_size: Optional[int] = None,
+    override_infantry_amount: Optional[int] = None,
+    override_max_archers_amount: Optional[int] = None,
 ) -> MarchResult:
     # Divisor is total number of roles the player is taking
     divisor = march_count + (1 if is_calling else 0)
     if divisor <= 0:
         raise ValueError("Must have at least one march (join count > 0 or is calling)")
     
-    # Server setting for joining marches
-    server_max_troop_size = g.max_troop_size
-    if server_max_troop_size <= 0:
-        raise ValueError("Server Max Troop Size not configured")
-    
-    if g.infantry_amount < 0 or g.max_archers_amount < 0:
-        raise ValueError("Invalid server settings")
+    # Effective settings (defaults to guild config, but can be overridden)
+    max_troop_size = override_max_troop_size if override_max_troop_size is not None else g.max_troop_size
+    infantry_amount = override_infantry_amount if override_infantry_amount is not None else g.infantry_amount
+    max_archers_amount = override_max_archers_amount if override_max_archers_amount is not None else g.max_archers_amount
+
+    if infantry_amount < 0 or max_archers_amount < 0:
+        raise ValueError("Invalid settings")
 
     base = total_archers // divisor
     
     if override_march_archers is not None:
         joining_archers = override_march_archers
     else:
-        # For coordination, joining archers are rounded down to nearest 1000 and capped by server MAA
-        capped_base = min(base, g.max_archers_amount)
+        # For coordination, joining archers are rounded down to nearest 1000 and capped by MAA
+        capped_base = min(base, max_archers_amount)
         joining_archers = (capped_base // 1000) * 1000
 
-    # Joining march: infantry is server-set, cavalry fills up to min(physical size, server cap)
-    joining_infantry = g.infantry_amount
-    if total_march_size is not None:
-        effective_joining_max = min(total_march_size, server_max_troop_size)
+    # Joining march: infantry is set, cavalry fills up to capacity
+    joining_infantry = infantry_amount
+    effective_joining_max = total_march_size
+    if effective_joining_max is None and max_troop_size > 0:
+        effective_joining_max = max_troop_size
+
+    if effective_joining_max is not None:
         joining_cavalry = max(0, effective_joining_max - joining_archers - joining_infantry)
     else:
-        joining_cavalry = 0 # Bot shows "Rest"
+        joining_cavalry = 0  # Still "Rest" if no capacity known at all
 
-    # Calling march: infantry is server-set, archers are the exact remainder
+    # Calling march: infantry is set, archers are the exact remainder
     if is_calling:
         remaining_archers = max(0, total_archers - (joining_archers * march_count))
-        calling_infantry = g.infantry_amount
+        calling_infantry = infantry_amount
         
         if total_march_size is not None:
-            # Caller is NOT limited by server max_troop_size, only by their physical limit
+            # Caller is NOT limited by max_troop_size, only by their physical limit
             max_archers_slot = max(0, total_march_size - calling_infantry)
             calling_archers = min(remaining_archers, max_archers_slot)
             calling_cavalry = max(0, total_march_size - calling_infantry - calling_archers)

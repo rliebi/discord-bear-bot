@@ -39,13 +39,16 @@ Example setup:
 ## Users: Calculate Marches
 Use the slash command:
 ```
-/calc archer_total:<int> march_count:<int> [is_calling:<true|false>] [override_march_archers:<int>] [total_march_size:<int>] [hidden:<true|false>]
+/calc archer_total:<int> march_count:<int> [is_calling:<true|false>] [override_march_archers:<int>] [total_march_size:<int>] [override_max_troop_size:<int>] [override_infantry_amount:<int>] [override_max_archers_amount:<int>] [hidden:<true|false>]
 ```
 - archer_total: Your total number of archers
 - march_count: How many joining marches you are sending/participating in
 - is_calling (optional): Whether you are also calling a rally (Default: true)
 - override_march_archers (optional): Force joining archers to this specific amount
 - total_march_size (optional): Your personal physical march capacity. Used to calculate exactly how much cavalry to send.
+- override_max_troop_size (optional): Override the server's MTS setting for this calculation.
+- override_infantry_amount (optional): Override the server's INF setting for this calculation.
+- override_max_archers_amount (optional): Override the server's MAA setting for this calculation.
 - hidden (optional): If true, the response is visible only to you (ephemeral). Defaults to public.
 
 ### What you get back

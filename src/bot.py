@@ -189,6 +189,9 @@ async def fetch_kvk_seasons(kingdom_id: int, limit: Optional[int] = None) -> Lis
     is_calling="Are you calling a rally? (Default: True)",
     override_march_archers="Optional: force joining archers to this amount (e.g. 50000)",
     total_march_size="Optional: your total march capacity (e.g. 250000). Also overrides threshold calculation.",
+    override_max_troop_size="Optional: override server Max Troop Size (MTS) for this calculation",
+    override_infantry_amount="Optional: override server Infantry Amount (INF) for this calculation",
+    override_max_archers_amount="Optional: override server Max Archers Amount (MAA) for this calculation",
     hidden="Optional: if true, the response is visible only to you"
 )
 async def calc(
@@ -198,6 +201,9 @@ async def calc(
     is_calling: Optional[bool] = True,
     override_march_archers: Optional[app_commands.Range[int, 0, 2000000]] = None,
     total_march_size: Optional[app_commands.Range[int, 1000, 2000000]] = None,
+    override_max_troop_size: Optional[app_commands.Range[int, 1000, 2000000]] = None,
+    override_infantry_amount: Optional[app_commands.Range[int, 0, 2000000]] = None,
+    override_max_archers_amount: Optional[app_commands.Range[int, 0, 2000000]] = None,
     hidden: Optional[bool] = False,
 ):
     guild = interaction.guild
@@ -227,8 +233,8 @@ async def calc(
     ttl_minutes = int(s.get("message_ttl_minutes", 10) or 0)
     ttl_seconds = ttl_minutes * 60 if ttl_minutes > 0 else None
 
-    # Validate server settings
-    if g.max_troop_size <= 0 or g.infantry_amount < 0 or g.max_archers_amount < 0:
+    # Validate server settings (MTS is optional for /calc now)
+    if g.infantry_amount < 0 or g.max_archers_amount < 0:
         await interaction.response.send_message(
             "Server settings are not configured yet. Ask an admin to run /admin settings.", ephemeral=True
         )
@@ -238,15 +244,23 @@ async def calc(
     extra = 120000
     if total_march_size is not None:
         extra = int(0.9 * int(total_march_size))
-    threshold = (int(march_count) * int(g.max_archers_amount)) + extra
+    
+    eff_maa = override_max_archers_amount if override_max_archers_amount is not None else g.max_archers_amount
+    threshold = (int(march_count) * int(eff_maa)) + extra
     ratio_mode = int(archer_total) > threshold
 
     # Build response embed
     embed = discord.Embed(title="Kingshot Bear Troop Ratio", color=discord.Color.green())
+    
+    def fmt_setting(name, guild_val, override_val):
+        if override_val is not None:
+            return f"{name}: {override_val} (Overridden)"
+        return f"{name}: {guild_val}"
+
     embed.add_field(name="Server Settings", value=(
-        f"Max Troop Size: {g.max_troop_size}\n"
-        f"Infantry Amount: {g.infantry_amount}\n"
-        f"Max Archers Amount: {g.max_archers_amount}"
+        f"{fmt_setting('Max Troop Size', g.max_troop_size, override_max_troop_size)}\n"
+        f"{fmt_setting('Infantry Amount', g.infantry_amount, override_infantry_amount)}\n"
+        f"{fmt_setting('Max Archers Amount', g.max_archers_amount, override_max_archers_amount)}"
     ), inline=False)
     
     # User Input summary
@@ -273,6 +287,9 @@ async def calc(
             override_march_archers=int(override_march_archers) if override_march_archers is not None else None,
             total_march_size=int(total_march_size) if total_march_size is not None else None,
             is_calling=bool(is_calling),
+            override_max_troop_size=int(override_max_troop_size) if override_max_troop_size is not None else None,
+            override_infantry_amount=int(override_infantry_amount) if override_infantry_amount is not None else None,
+            override_max_archers_amount=int(override_max_archers_amount) if override_max_archers_amount is not None else None,
         )
     except Exception as e:
         await interaction.response.send_message(f"Error: {e}", ephemeral=True)
@@ -280,7 +297,9 @@ async def calc(
 
     # Joining march
     if march_count > 0:
-        joining_cav_display = str(result.joining_cavalry) if total_march_size is not None else "Rest"
+        eff_mts = override_max_troop_size if override_max_troop_size is not None else g.max_troop_size
+        show_rest = (total_march_size is None and eff_mts <= 0)
+        joining_cav_display = "Rest" if show_rest else str(result.joining_cavalry)
         embed.add_field(name="Your Joining March", value=(
             f"Archers: {result.joining_archers}\n"
             f"Infantry: {result.joining_infantry}\n"
