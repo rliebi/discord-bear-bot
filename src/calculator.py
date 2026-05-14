@@ -54,11 +54,18 @@ def compute_kingshot(
 
     # Joining march: infantry is set, cavalry fills up to capacity
     joining_infantry = infantry_amount
-    effective_joining_max = total_march_size
-    if effective_joining_max is None and max_troop_size > 0:
-        effective_joining_max = max_troop_size
+    
+    # Joining Marches always respect the Max Joining Troop Count (max_troop_size)
+    effective_joining_max = max_troop_size if max_troop_size > 0 else None
+    
+    # If the user provides an individual total_march_size, it might be smaller than the server's max_troop_size.
+    # A player cannot send more than their own capacity.
+    if total_march_size is not None:
+        if effective_joining_max is None or total_march_size < effective_joining_max:
+            effective_joining_max = total_march_size
 
     if effective_joining_max is not None:
+        joining_archers = min(joining_archers, max(0, effective_joining_max - joining_infantry))
         joining_cavalry = max(0, effective_joining_max - joining_archers - joining_infantry)
     else:
         joining_cavalry = 0  # Still "Rest" if no capacity known at all
@@ -68,8 +75,8 @@ def compute_kingshot(
         remaining_archers = max(0, total_archers - (joining_archers * march_count))
         calling_infantry = infantry_amount
         
+        # If user enters max troop size (total_march_size), this affects the calling march.
         if total_march_size is not None:
-            # Caller is NOT limited by max_troop_size, only by their physical limit
             max_archers_slot = max(0, total_march_size - calling_infantry)
             calling_archers = min(remaining_archers, max_archers_slot)
             calling_cavalry = max(0, total_march_size - calling_infantry - calling_archers)
